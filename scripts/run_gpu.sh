@@ -2,7 +2,7 @@
 # GPU benchmarks for bin/cg_gpu (MPI + OpenMP target offload, one GPU per MPI rank).
 #   MACHINE=vanda_gpu bash scripts/run_gpu.sh
 # Knobs: MACHINE, NGPU (GPUs in the job, default: number of lines in PBS_NODEFILE or 1),
-#        GPU_SIZES, ITERS, REPS, MPIRUN, BIN.   Output: results/$MACHINE/gpu.csv
+#        GPU_SIZES, GSOLVE_N (time-to-solution grid, 512), ITERS, REPS, MPIRUN, BIN.   Output: results/$MACHINE/gpu.csv
 set -euo pipefail
 cd "$(dirname "$0")/.."
 MACHINE=${MACHINE:-gpu}
@@ -11,8 +11,14 @@ ITERS=${ITERS:-50}
 REPS=${REPS:-3}
 MPIRUN=${MPIRUN:-mpirun}
 GPU_SIZES=${GPU_SIZES:-"128 192 256 384 512 640 768"}
+# GPUs granted to this job: PBS sets CUDA_VISIBLE_DEVICES; nvidia-smi may list the whole node
 if [[ -z "${NGPU:-}" ]]; then
-    NGPU=$( (nvidia-smi -L 2>/dev/null || true) | grep -c '^GPU' || true); (( NGPU >= 1 )) || NGPU=1
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+        NGPU=$(tr ',' '\n' <<< "$CUDA_VISIBLE_DEVICES" | grep -c .)
+    else
+        NGPU=$( (nvidia-smi -L 2>/dev/null || true) | grep -c '^GPU' || true)
+    fi
+    (( NGPU >= 1 )) || NGPU=1
 fi
 OUT=results/$MACHINE
 mkdir -p "$OUT"
@@ -54,11 +60,11 @@ done; done; done
 # 3. several GPUs (if the job has them): strong (N=512) and weak (~384^3 per GPU) scaling
 if (( NGPU > 1 )); then
     for rep in $(seq 1 "$REPS"); do for P in $(seq 1 "$NGPU"); do
-        record gstrong "$rep" $MPIRUN -np "$P" "$BIN/cg_gpu" -n 512 -t 0 -m "$ITERS" -q
-        record gweak "$rep" $MPIRUN -np "$P" "$BIN/cg_gpu" -L 384 -t 0 -m "$ITERS" -q
+        record gstrong "$rep" $MPIRUN -np "$P" "$BIN/cg_gpu" -n "${GSTRONG_N:-512}" -t 0 -m "$ITERS" -q
+        record gweak "$rep" $MPIRUN -np "$P" "$BIN/cg_gpu" -L "${GWEAK_L:-384}" -t 0 -m "$ITERS" -q
     done; done
 fi
 
 # 4. complete solve on one GPU, same problem as the CPU time-to-solution table
-for a in cg cg1; do record gsolve 1 $MPIRUN -np 1 "$BIN/cg_gpu" -n 512 -a $a -t 1e-8 -q; done
+for a in cg cg1; do record gsolve 1 $MPIRUN -np 1 "$BIN/cg_gpu" -n "${GSOLVE_N:-512}" -a $a -t 1e-8 -q; done
 echo "done -> $CSV"
