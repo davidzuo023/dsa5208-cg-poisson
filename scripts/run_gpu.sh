@@ -20,6 +20,9 @@ if [[ -z "${NGPU:-}" ]]; then
     fi
     (( NGPU >= 1 )) || NGPU=1
 fi
+# never more ranks than devices the OpenMP runtime can actually see
+NDEV=$("$BIN/cg_gpu" -n 8 2>&1 >/dev/null | sed -n 's/.*devices\/node=\([0-9]*\).*/\1/p')
+if [[ -n $NDEV ]] && (( NDEV >= 1 && NDEV < NGPU )); then NGPU=$NDEV; fi
 OUT=results/$MACHINE
 mkdir -p "$OUT"
 CSV=$OUT/gpu.csv

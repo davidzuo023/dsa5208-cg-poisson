@@ -44,7 +44,7 @@ if [[ -n "${PBS_NODEFILE:-}" && -f "${PBS_NODEFILE:-}" ]]; then
     CPN=$(( $(wc -l < "$PBS_NODEFILE") / NODES ))     # = mpiprocs per node in the select line
 else
     NODES=1
-    CPN=$(nproc)
+    CPN=$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)   # nproc obeys OMP_NUM_THREADS
 fi
 CORES=$(( NODES * CPN ))
 if [[ -z "${PLIST:-}" ]]; then
@@ -64,6 +64,9 @@ fi
 HOSTOPT=""
 [[ -n "${PBS_NODEFILE:-}" && -f "${PBS_NODEFILE:-}" ]] && HOSTOPT="--hostfile $PBS_NODEFILE"
 
+# environment for ranks started on other nodes (only variables that are set)
+XENV=""; for v in PATH LD_LIBRARY_PATH; do [[ -n "${!v:-}" ]] && XENV="$XENV -x $v"; done
+
 # launch P T solver-args...   (pins every rank to T consecutive cores, threads close to it)
 launch() {
     local P=$1 T=$2; shift 2
@@ -71,6 +74,7 @@ launch() {
     case $MPI_FLAVOR in
     openmpi)
         $MPIRUN -np "$P" $HOSTOPT --map-by "ppr:${ppn}:node:PE=${T}" --bind-to core \
+            $XENV \
             -x OMP_NUM_THREADS="$T" -x OMP_PLACES=cores -x OMP_PROC_BIND=close "$BIN/cg_mpi" "$@" ;;
     intelmpi)
         # under PBS, Intel MPI ignores -ppn unless the scheduler's placement is switched off

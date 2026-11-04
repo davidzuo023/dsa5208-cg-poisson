@@ -7,10 +7,18 @@ cd "$(dirname "$0")/.."
 export OMPI_MCA_btl_vader_single_copy_mechanism=none
 nvidia-smi || echo "WARNING: nvidia-smi failed"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+# `module` is a shell function of the job shell; make sure this child shell has it too
+if ! type module >/dev/null 2>&1; then
+    for f in /etc/profile.d/modules.sh /usr/share/Modules/init/bash /etc/profile.d/lmod.sh \
+             /usr/share/lmod/lmod/init/bash; do [[ -f $f ]] && { . "$f"; break; }; done
+fi
+type module >/dev/null 2>&1 || { echo "module command not available"; exit 1; }
 BIN=bin_gpu; mkdir -p $BIN
-ok=0
+ok=0; prev=""
 for mod in nvhpc-hpcx-cuda12/26.1 nvhpc-hpcx-2.20-cuda12/26.1 nvhpc/24.5 nvhpc/26.1; do
-    module purge >/dev/null 2>&1
+    # unload only what the previous attempt loaded (a full purge could drop site module paths)
+    [[ -n $prev ]] && module unload "$prev" >/dev/null 2>&1
+    prev=$mod
     module load "$mod" >/dev/null 2>&1 || { echo "-- $mod: module not loadable"; continue; }
     command -v nvc >/dev/null && command -v mpicc >/dev/null || { echo "-- $mod: no nvc/mpicc"; continue; }
     mpicc --version 2>&1 | grep -qi -E "nvc|nvidia" || { echo "-- $mod: mpicc does not wrap nvc"; continue; }
