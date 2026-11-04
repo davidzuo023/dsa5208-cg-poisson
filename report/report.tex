@@ -85,7 +85,7 @@ $512^3$ grid already holds 134 million unknowns and needs about two thousand CG 
 problems in reasonable time and memory requires distributing them across many nodes.
 
 The Conjugate Gradient method is the method of choice for these symmetric positive definite systems, and
-it is also a standard stress test for parallel computers: the HPCG benchmark, which complements LINPACK
+it is also a standard stress test for parallel computers: the HPCG benchmark~[4], which complements LINPACK
 in the TOP500 ranking, is built around it because supercomputers reach only a few percent of their peak
 performance on it. The reason lies in the structure of a single iteration. Its matrix--vector product
 couples every unknown to its grid neighbours, so a distributed implementation has to exchange the
@@ -143,7 +143,7 @@ an eigenvector of the discrete operator, CG converges on it in a single iteratio
 hide most bugs. For our $u$ the discrete solution differs from the exact one by a genuine $O(h^2)$ error,
 which turns the comparison with $u$ into a sharp end-to-end test.
 
-CG (\cref{alg:cg}) builds the iterates $\vb x_k$ from the residuals $\vb r_k=\vb b-A\vb x_k$ and the
+CG~[1,6] (\cref{alg:cg}) builds the iterates $\vb x_k$ from the residuals $\vb r_k=\vb b-A\vb x_k$ and the
 search directions $\vb p_k$; the step length $\alpha_k$ minimises the $A$-norm of the error along
 $\vb p_k$, and $\beta_{k+1}$ keeps the new direction $A$-conjugate to all previous ones. The scalar
 $\gamma_k=\|\vb r_k\|^2$ doubles as the stopping criterion with relative tolerance $\varepsilon$. The
@@ -232,15 +232,15 @@ concerns locality. Our first version deferred the shell layers on all six sides,
 process handled its $k=1$ and $k=n_z$ columns as isolated, strided points even though these lie on the
 physical boundary and need no communication. This cost 10--15\% per iteration in our measurements and made
 the overlapped mode slower than the blocking one. Restricting the deferred shell to layers that face an
-actual neighbour removed the penalty: both modes now run equally fast on shared memory, and the
-overlapped mode keeps its advantage wherever messages take real time.
+actual neighbour removed this penalty; what remains is the cost of the second pass over the shell, which
+pays off only when messages take real time (\cref{sec:variants}).
 
 \subsection{Global reductions and three formulations of CG}\label{sec:reductions}
 Classic CG (\cref{alg:cg}) performs two \code{MPI\_Allreduce} operations per iteration on a single value
 each. Nothing useful can run while they are in flight, and with recursive doubling each costs about
 $\lceil\log_2P\rceil$ network latencies. Two algebraically equivalent reformulations attack this term.
 
-The Chronopoulos--Gear variant (\code{-a cg1}) introduces the auxiliary vectors $\vb w_k=A\vb r_k$ and
+The Chronopoulos--Gear variant~[2] (\code{-a cg1}) introduces the auxiliary vectors $\vb w_k=A\vb r_k$ and
 $\vb s_k=A\vb p_k$. Since $\vb p_k=\vb r_k+\beta_k\vb p_{k-1}$, linearity gives the recurrence
 $\vb s_k=\vb w_k+\beta_k\vb s_{k-1}$, and the only stencil application per iteration becomes $\vb w_k=A\vb
 r_k$. The denominator $\vb p_k^TA\vb p_k$ of $\alpha_k$ can then be expressed through $\gamma_k=\vb r_k^T\vb
@@ -254,7 +254,7 @@ Both inner products are now available at the same moment and travel in one \code
 values. The four vector updates ($\vb p,\vb s,\vb x,\vb r$) and $\gamma$ are fused into one sweep and
 $\delta$ into the stencil sweep, so the memory traffic per iteration stays that of classic CG.
 
-The pipelined variant of Ghysels and Vanroose (\code{-a pipecg}) goes one step further and removes the
+The pipelined variant of Ghysels and Vanroose~[3] (\code{-a pipecg}) goes one step further and removes the
 dependency between the reduction and the stencil. It adds $\vb z_k=A\vb s_k$ and $\vb q_k=A\vb w_k$ with
 the recurrences $\vb z_k=\vb q_k+\beta_k\vb z_{k-1}$ and $\vb w_{k+1}=\vb w_k-\alpha_k\vb z_k$. Now
 $\gamma_k$ and $\delta_k$ depend only on $\vb r_k$ and $\vb w_k$, which are known before $\vb q_k$ is
@@ -287,7 +287,7 @@ where $B_v$ is the memory traffic per grid point of the CG variant (\cref{tab:va
 memory bandwidth available to one process when $P$ processes share the hardware, $m$ and $V$ the message
 count and halo volume of the busiest process from \eqref{eq:volume}, $t_s$ the latency of a message,
 $t_w$ the transfer time per value, and $\rho$ the number of reductions per iteration that are not hidden.
-$B_v$ counts explicit loads and stores in the STREAM convention, assuming that the stencil's neighbour
+$B_v$ counts explicit loads and stores in the convention of the STREAM benchmark~[5], assuming that the stencil's neighbour
 values are reused from cache. For classic CG the stencil reads $\vb p$ and writes $\vb q$, the $\vb x,\vb r$
 update reads four vectors and writes two, and the $\vb p$ update reads two and writes one: $2+6+3=11$
 accesses, or 88 bytes. Fusing the two inner products into these sweeps avoids three further reads.
@@ -439,7 +439,7 @@ $P$ & process grid & ms / iteration & speedup & efficiency (\%) & comm (\%) & ML
 
 \Cref{fig:bandwidth} converts the measured time per iteration into DRAM traffic with the 96-byte model of
 \cref{sec:model} (88 bytes of explicit loads and stores plus the write-allocate of the stencil output) and
-compares it with the STREAM triad counted the same way. One core moves \CGbwOne\,GB/s, slightly more than
+compares it with the STREAM triad counted the same way. One core moves \CGbwOne\,GB/s, more than
 STREAM on that core (\StreamOne\,GB/s). STREAM itself grows linearly up to eight threads and then
 saturates: from 16 to 36 threads it gains only 21\%. The solver follows the same curve and reaches
 \CGbwAll\,GB/s on \Pmax{} cores, 70\% of the node's STREAM bandwidth (\StreamAll\,GB/s). Inside a node the
@@ -461,7 +461,7 @@ access they remove is a direct reduction in run time.
 \end{figure}
 
 The breakdown in \cref{fig:breakdown} shows where the bandwidth goes. The vector updates take
-\VecFracSerial\% of a serial iteration, more than the stencil, because they account for nine of the eleven
+\VecFracSerial\% of a single-process iteration, more than the stencil, because they account for nine of the eleven
 memory accesses per point while doing almost no arithmetic. Through $P=32$ the communication phases stay
 thin. At $P=\Pmax$ the picture changes: the reductions absorb 30\,ms of a 54.5\,ms iteration. This is
 waiting, not data movement, since an \code{MPI\_Allreduce} of one value takes microseconds inside a node.
@@ -491,8 +491,7 @@ faster than the baseline on four processes and equal from 16 processes on (\RelC
 moves the same bytes, and its advantage comes from the single fused update sweep, which counts while the
 cores rather than the memory set the pace.
 
-The decompositions follow the volume model of \cref{fig:commvol}. Up to eight processes the three
-decompositions are within 2\% of each other. From 16 processes on, slabs fall behind and run 13--14\% slower
+The decompositions follow the volume model of \cref{fig:commvol}. Up to eight processes slabs are within 2\% of blocks. From 16 processes on, slabs fall behind and run 13--14\% slower
 at $P=32$ and $P=\Pmax$, where every process ships two full $512^2$ planes, 4\,MiB per iteration against
 1.1\,MiB for blocks. Pencils are never slower than blocks and up to 5\% faster: they avoid the strided
 $k$-faces, whose gather and shell pass cost more on one node than the extra halo volume saves.
@@ -523,7 +522,7 @@ process counts; \cref{fig:variants} shows all of them).}\label{tab:variants}
 \subsection{Processes versus threads}\label{sec:hybrid}
 
 \Cref{fig:hybrid} and \cref{tab:hybrid} keep all \HybCores{} cores busy and vary the split into MPI
-processes and OpenMP threads. \HybSentence{} Two to four threads per process are best (52.7--52.8\,ms):
+processes and OpenMP threads. \HybSentence{} Two or four threads per process are best (52.8 and 52.7\,ms):
 fewer processes mean fewer and larger halo messages and fewer participants in each reduction. From six
 threads per process on, the reduction wait disappears (below 1\,ms per iteration), but the iteration does
 not get faster. The imbalance has moved inside the processes, where threads that share a slow memory
@@ -556,7 +555,7 @@ For weak scaling each process keeps about $\WeakLocal^3$ grid points, i.e.\ $N=\
 P^{1/3})$. \Cref{fig:weak} reports the time per grid point and iteration relative to one process. At
 $P=\WeakPmax$ the efficiency is \WeakEffPmax\%: one process completes its iteration in 21.1\,ms, 36 processes
 need 102.9\,ms for 36 times the data. The cause is the same wall: the bandwidth available to each process
-drops from 26\,GB/s to 6.6\,GB/s. On one node, weak and strong scaling measure the same thing, how the
+drops from 32\,GB/s to 6.6\,GB/s. On one node, weak and strong scaling measure the same thing, how the
 memory bandwidth is shared. Across nodes, where every node brings its own memory, weak scaling isolates
 the halo and reduction terms of \eqref{eq:model}. Weak scaling of the time per iteration also flatters the
 algorithm: the iteration count grows like $N\propto P^{1/3}$, so the time to solution grows by the same
@@ -586,8 +585,7 @@ algorithm & $P$ & iterations & time (s) & ms / iteration & true residual & max e
 
 We built a matrix-free hybrid MPI\,+\,OpenMP Conjugate Gradient solver for the 3D Poisson equation in
 which decomposition, halo exchange, reduction strategy and threading are run-time switches. It reproduces
-the serial solution to rounding level in \ValRuns{} configurations and \ValEdge{} edge cases, on the
-development machine and again on Vanda, and converges to the exact solution at the theoretical second
+the serial solution to rounding level in \ValRuns{} configurations and \ValEdge{} edge cases, and again in the quick suite run on Vanda, and converges to the exact solution at the theoretical second
 order, so every performance difference we measure is a property of the parallel design.
 
 On a Vanda node CG runs into the memory-bandwidth wall. The solver scales almost perfectly to four
@@ -598,7 +596,7 @@ its 36\% traffic surcharge almost in full (\RelPipe{} measured), CG1 is up to 10
 and never more than 1\% slower, slabs lose 13--14\% once their constant halo volume stops shrinking, and overlapping
 the halo pays only where messages cross a network. The global reductions do more damage as barriers than
 as messages: on 36 cores they turn the bandwidth imbalance between two sockets into 30\,ms of waiting per
-iteration, and two to four OpenMP threads per process recover 3\% of the iteration.
+iteration, and two or four OpenMP threads per process recover 3\% of the iteration.
 
 For the reduction term the three CG formulations offer a clear trade-off. Merging the two reductions
 (Chronopoulos--Gear) costs nothing and is the formulation we recommend by default. Hiding the reduction
