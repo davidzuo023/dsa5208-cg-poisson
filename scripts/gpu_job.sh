@@ -31,4 +31,4 @@ for mod in nvhpc-hpcx-cuda12/26.1 nvhpc-hpcx-2.20-cuda12/26.1 nvhpc/24.5 nvhpc/2
     echo "-- $mod: GPU run failed"
 done
 (( ok )) || { echo "no working GPU toolchain found"; exit 1; }
-MACHINE=vanda_gpu BIN=$BIN ITERS=50 REPS=3 GPU_SIZES="128 192 256 384 512 640 768" bash scripts/run_gpu.sh
+MACHINE=${MACHINE:-vanda_gpu} BIN=$BIN ITERS=50 REPS=3 GPU_SIZES="128 192 256 384 512 640 768" bash scripts/run_gpu.sh

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GPU benchmarks for bin/cg_gpu (MPI + OpenMP target offload, one GPU per MPI rank).
 #   MACHINE=vanda_gpu bash scripts/run_gpu.sh
-# Knobs: MACHINE, NGPU (GPUs of the job; default from CUDA_VISIBLE_DEVICES / nvidia-smi, capped
+# Knobs: ONLY=validate (stop after step 1), VAL_P (rank counts for step 1), MACHINE, NGPU (GPUs of the job; default from CUDA_VISIBLE_DEVICES / nvidia-smi, capped
 #        by the devices the OpenMP runtime sees), GPU_SIZES, GSOLVE_N (512), GSTRONG_N (512),
 #        GWEAK_L (384), ITERS, REPS, MPIRUN, BIN.   Output: results/$MACHINE/gpu.csv
 set -euo pipefail
@@ -55,12 +55,14 @@ cat "$OUT/env.txt"
 # 1. correctness on the GPU, point-wise against the serial solution. P = 1, 2, 4 ranks: with
 #    one GPU the ranks share it, which still runs the halo path (pack on the GPU, staging,
 #    MPI, unpack) on real hardware.
-VAL_P="1 2 4"; (( NGPU > 4 )) && VAL_P="$VAL_P $NGPU"
+#    P = 8 (2x2x2 ranks) exercises all three face directions. Ranks sharing a GPU are not
+#    bound to cores (the job's cpuset on GPU nodes makes Open MPI's core binding fail).
+VAL_P=${VAL_P:-"1 2 4 8"}
 ser=/tmp/ser40.$$.bin gpu=/tmp/gpu40.$$.bin nfail=0
 "$BIN/cg_serial" -n 40 -q -o $ser > /dev/null
 for P in $VAL_P; do for a in cg cg1; do
     rm -f $gpu
-    l=$($MPIRUN --oversubscribe -np "$P" "$BIN/cg_gpu" -n 40 -a $a -q -o $gpu | csv) || true
+    l=$($MPIRUN --oversubscribe --bind-to none -np "$P" "$BIN/cg_gpu" -n 40 -a $a -q -o $gpu | csv) || true
     d=nan; [[ -f $gpu ]] && d=$(python3 scripts/compare_bin.py $gpu $ser 2>/dev/null || echo nan)
     ok=$(python3 -c "import sys; d=float(sys.argv[1]); print('PASS' if d == d and d < 1e-10 else 'FAIL')" "$d" 2>/dev/null || echo FAIL)
     [[ $ok == PASS ]] || nfail=$((nfail + 1))
@@ -69,6 +71,7 @@ for P in $VAL_P; do for a in cg cg1; do
 done; done
 rm -f $ser $gpu
 echo "validation: $nfail failure(s)" | tee -a "$OUT/validation.txt"
+[[ ${ONLY:-} == validate ]] && { echo "done (validation only) -> $OUT/validation.txt"; exit 0; }
 
 # 2. one GPU, growing problem: time per iteration and effective bandwidth
 for rep in $(seq 1 "$REPS"); do for N in $GPU_SIZES; do for a in cg cg1; do
