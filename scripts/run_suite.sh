@@ -11,7 +11,10 @@
 #   REPS          repetitions of every configuration (plots use the minimum)     [3]
 #   PLIST         MPI process counts   [powers of 2 below a node, half node, whole nodes]
 #   VARIANT_PMIN  smallest P for the decomposition/halo/algorithm variants        [2]
-#   EXPERIMENTS   subset of: stream serial strong variants hybrid weak solve     [all]
+#   EXPERIMENTS   subset of: stream serial strong variants hybrid weak solve sizes
+#                 strong2 (sizes = serial code on SIZES, fixed iterations and full solves;
+#                 strong2 = strong scaling of NS2^3 from one node up)  [all but sizes, strong2]
+#   SIZES         grids for the serial problem-size study           [64 96 128 192 256 384 512]
 #   MPI_FLAVOR    openmpi | intelmpi | mpich                          [auto-detected]
 #   MPIRUN        launcher                                                       [mpirun]
 #   BIN           directory with the executables                                 [bin]
@@ -112,6 +115,16 @@ if has stream; then
     OMP_PROC_BIND=close OMP_PLACES=cores "$BIN/stream_omp" 80 "$CPN" | tee "$OUT/stream.csv"
 fi
 
+# serial problem-size study: matrix dimension N^3 and nonzeros ~7N^3 both vary
+if has sizes; then
+    for N in ${SIZES:-64 96 128 192 256 384 512}; do
+        for rep in $(seq 1 "$REPS"); do
+            record sizes_iter "$rep" "$BIN/cg_serial" -n "$N" -t 0 -m "$ITERS" -q
+        done
+        record sizes_solve 1 "$BIN/cg_serial" -n "$N" -t 1e-8 -q
+    done
+fi
+
 for rep in $(seq 1 "$REPS"); do
     if has serial; then
         record serial "$rep" "$BIN/cg_serial" -n "$NS" -t 0 -m "$ITERS" -q
@@ -131,6 +144,11 @@ for rep in $(seq 1 "$REPS"); do
                 record alg "$rep" launch "$P" 1 -n "$NS" -t 0 -m "$ITERS" -a $a -c overlap -d 3 -q
             done
             record alg "$rep" launch "$P" 1 -n "$NS" -t 0 -m "$ITERS" -a pipecg -c blocking -d 3 -q
+        fi
+        # strong scaling of a larger grid (NS2^3), from one full node upwards
+        if has strong2 && (( P >= CPN )); then
+            record strong2 "$rep" launch "$P" 1 -n "${NS2:-768}" -t 0 -m "$ITERS" -a cg -c overlap -d 3 -q
+            record strong2_pipe "$rep" launch "$P" 1 -n "${NS2:-768}" -t 0 -m "$ITERS" -a pipecg -c overlap -d 3 -q
         fi
         if has weak; then
             record weak "$rep" launch "$P" 1 -L "$NW" -t 0 -m "$ITERS" -a cg -c overlap -d 3 -q

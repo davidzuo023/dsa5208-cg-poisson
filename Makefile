@@ -34,6 +34,14 @@ $(BIN)/cg_mpi: $(SRC)/cg_mpi.c $(SRC)/common.h | $(BIN)
 $(BIN)/stream_omp: $(SRC)/stream_omp.c | $(BIN)
 	$(MPICC) $(CFLAGS) $(OMPFLAG) -o $@ $< $(LDLIBS)
 
+# GPU build (MPI + OpenMP target offload). Default flags: NVIDIA HPC SDK for an A40 (sm_86).
+# Host-fallback test build without a GPU compiler:  make gpu GPUFLAGS="-O2 -fopenmp -foffload=disable"
+GPUCC    ?= mpicc
+GPUFLAGS ?= -O3 -mp=gpu -gpu=cc86 -Minfo=mp
+gpu: $(BIN)/cg_gpu $(BIN)/cg_serial
+$(BIN)/cg_gpu: $(SRC)/cg_gpu.c $(SRC)/common.h | $(BIN)
+	$(GPUCC) $(GPUFLAGS) -o $@ $< $(LDLIBS)
+
 test: all
 	bash scripts/validate.sh quick
 
@@ -47,4 +55,4 @@ report:
 clean:
 	rm -rf $(BIN) *.bin
 
-.PHONY: all test report clean
+.PHONY: all gpu test report clean

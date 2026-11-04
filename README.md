@@ -56,12 +56,18 @@ make report RESULTS=results/vanda
 src/cg_serial.c        serial reference solver (classic CG)
 src/cg_mpi.c           hybrid MPI+OpenMP solver (all variants)
 src/common.h           problem definition (manufactured solution), CSV format
+src/cg_gpu.c           MPI + OpenMP target-offload solver (classic CG and CG1, one GPU per rank)
 src/stream_omp.c       STREAM-triad bandwidth probe (for the roofline/performance model)
 scripts/validate.sh    correctness suite (parallel vs serial, edge cases, O(h^2) study, residual histories)
 scripts/check_validation.py   PASS/FAIL evaluation of the validation CSVs
 scripts/run_suite.sh   benchmark suite (strong, weak, variants, hybrid, time-to-solution, STREAM)
 scripts/comm_volume.sh halo volume per iteration for 1D/2D/3D decompositions
 scripts/make_plots.py  figures + LaTeX tables + number macros for the report
+scripts/run_gpu.sh     GPU benchmarks (validation vs serial, size sweep, multi-GPU, time to solution)
+scripts/gpu_job.sh     builds with the NVIDIA HPC SDK on a Vanda GPU node and runs run_gpu.sh
+pbs/vanda256.pbs       PBS job: 8 nodes x 32 cores, strong/weak scaling to 256 MPI processes
+pbs/vanda_sizes.pbs    PBS job: serial problem-size study (N = 64 ... 512) on one core
+pbs/vanda_gpu.pbs      PBS job: one A40 GPU (calls scripts/gpu_job.sh)
 pbs/vanda_suite.pbs    PBS job: build, quick validation, full benchmark suite on Vanda
 pbs/atlas_suite.pbs    same for Atlas (queue parallel24)
 pbs/validate.pbs       full validation as a PBS job
@@ -170,6 +176,21 @@ is added automatically).
    paragraph of Section 5 switches from the development machine to the cluster description
    automatically. Then re-read Section 5 and adjust the interpretation where the cluster data
    tells a different story (the paragraphs specific to the 2-core machine are dropped).
+
+### The three follow-up jobs (256 cores, problem size, GPU)
+
+```bash
+qsub pbs/vanda_sizes.pbs   # 1 core,  ~30 min  -> results/vanda_sizes/bench.csv   (exp = sizes_iter, sizes_solve)
+qsub pbs/vanda256.pbs      # 8 x 32 cores      -> results/vanda256/bench.csv      (strong, strong2, weak, variants, hybrid, solve)
+qsub pbs/vanda_gpu.pbs     # 1 A40 GPU, ~20 min -> results/vanda_gpu/gpu.csv, validation.txt
+```
+
+The GPU build uses `nvhpc-hpcx-cuda12/26.1` (`mpicc` wraps `nvc`, flags `-mp=gpu -gpu=cc86`);
+`OMP_TARGET_OFFLOAD=MANDATORY` makes a run fail instead of silently falling back to the host.
+The same script works in an interactive GPU session:
+`qsub -I -q auto_free -l select=1:ncpus=36:ngpus=1 -l walltime=01:00:00`, then
+`cd <project> && bash scripts/gpu_job.sh`. Without a GPU compiler the code still builds and
+runs on the host: `make gpu GPUFLAGS="-O2 -fopenmp -foffload=disable"`.
 
 Knobs of `scripts/run_suite.sh` (environment variables): `MACHINE`, `NS`, `NW`, `ITERS`, `REPS`,
 `PLIST`, `VARIANT_PMIN`, `EXPERIMENTS`, `MPI_FLAVOR`, `MPIRUN`, `BIN`, `APPEND` (see the header of
