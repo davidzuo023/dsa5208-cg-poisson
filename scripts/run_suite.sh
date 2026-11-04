@@ -48,7 +48,7 @@ else
 fi
 CORES=$(( NODES * CPN ))
 if [[ -z "${PLIST:-}" ]]; then
-    # 1, 2, 4, ... below one node, half a node (one socket on 2-socket nodes), then whole
+    # 1, 2, 4, ... below one node, half a node (one socket when the job has whole nodes), then whole
     # nodes only: a P that splits unevenly across nodes (e.g. 128 = 72 + 56) is not used
     PLIST=$( { p=1; while (( p < CPN )); do echo $p; p=$(( p * 2 )); done
                (( CPN % 2 == 0 )) && echo $(( CPN / 2 ))
@@ -66,6 +66,11 @@ HOSTOPT=""
 
 # environment for ranks started on other nodes (only variables that are set)
 XENV=""; for v in PATH LD_LIBRARY_PATH; do [[ -n "${!v:-}" ]] && XENV="$XENV -x $v"; done
+# Open MPI: start remote daemons from the same installation as this mpirun
+PREFIX=""
+if [[ ${MPI_FLAVOR:-} == openmpi ]] && command -v mpirun >/dev/null; then
+    PREFIX="--prefix $(dirname "$(dirname "$(command -v mpirun)")")"
+fi
 
 # launch P T solver-args...   (pins every rank to T consecutive cores, threads close to it)
 launch() {
@@ -73,7 +78,7 @@ launch() {
     local ppn=$(( CPN / T )); (( ppn > P )) && ppn=$P
     case $MPI_FLAVOR in
     openmpi)
-        $MPIRUN -np "$P" $HOSTOPT --map-by "ppr:${ppn}:node:PE=${T}" --bind-to core \
+        $MPIRUN -np "$P" $HOSTOPT $PREFIX --map-by "ppr:${ppn}:node:PE=${T}" --bind-to core \
             $XENV \
             -x OMP_NUM_THREADS="$T" -x OMP_PLACES=cores -x OMP_PROC_BIND=close "$BIN/cg_mpi" "$@" ;;
     intelmpi)
@@ -110,8 +115,29 @@ has() { [[ " $EXPERIMENTS " == *" $1 "* ]]; }
     hostname; lscpu 2>/dev/null | grep -E "Model name|Socket|Core|Thread|NUMA node\(|L2|L3" || true
     $MPIRUN --version 2>&1 | head -2 || true
     ${MPICC:-mpicc} --version 2>&1 | head -1 || true   # the compiler that built all binaries
+    command -v ompi_info >/dev/null && ompi_info 2>/dev/null | grep -E "MCA (pml|btl|mtl):" | sed 's/^ */  /' || true
+    if (( NODES > 1 )) && [[ $MPI_FLAVOR == openmpi ]]; then
+        echo "placement (one line per node: host, cores allowed to this job, CPU):"
+        $MPIRUN -np "$NODES" $HOSTOPT $PREFIX --map-by ppr:1:node --bind-to none \
+            sh -c 'echo "  $(hostname)  cpus=$(grep Cpus_allowed_list /proc/self/status | cut -f2)  $(lscpu | grep "Model name" | sed "s/.*: *//")"' \
+            2>&1 | sort || true
+    fi
 } > "$OUT/env.txt"
 cat "$OUT/env.txt"
+
+# multi-node jobs: one quick run on all cores first. If ranks cannot be started on the
+# other nodes, measure on the first node only instead of failing for the whole walltime.
+if (( NODES > 1 )) && [[ $MPI_FLAVOR == openmpi ]]; then
+    if ! launch "$CORES" 1 -n 64 -t 0 -m 2 -q 2>&1 | grep -q '^CSV,'; then
+        echo "WARNING: multi-node launch failed; restricting to one node (P <= $CPN)" | tee -a "$OUT/env.txt"
+        PLIST=$(for p in $PLIST; do if (( p <= CPN )); then echo $p; fi; done | tr '\n' ' ')
+        NODES=1; CORES=$CPN
+        first=$(head -1 "$PBS_NODEFILE"); grep -x -F "$first" "$PBS_NODEFILE" > "$OUT/hostfile.node1"
+        HOSTOPT="--hostfile $OUT/hostfile.node1"
+    else
+        echo "multi-node launch test on $CORES ranks: OK" | tee -a "$OUT/env.txt"
+    fi
+fi
 
 # ------------------------------------------------------------------ experiments
 if has stream; then

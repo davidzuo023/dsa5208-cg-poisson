@@ -214,7 +214,7 @@ static void copy_vec(Ctx *c, double *dst, double *src)
             for (int k = 1; k <= n2; k++) dst[i * sI + j * sJ + k] = src[i * sI + j * sJ + k];
 }
 
-/* r = b = h^2 f from the separable 1D tables (mapped to the device once) ; returns b.b */
+/* r = b = h^2 f from the separable 1D tables (copied to the device for this kernel) ; returns b.b */
 static double set_rhs(Ctx *c, double *r)
 {
     const int n0 = c->n[0], n1 = c->n[1], n2 = c->n[2];
@@ -401,6 +401,14 @@ int main(int argc, char **argv)
     double bb = set_rhs(c, r);
     MPI_Allreduce(MPI_IN_PLACE, &bb, 1, MPI_DOUBLE, MPI_SUM, c->cart);
     const double bnorm = sqrt(bb);
+    /* warm-up, untimed: launch every loop kernel (and the halo path) once so that one-off
+     * kernel loading is not charged to the solve. x = 0 and the step sizes are 0, so no
+     * vector changes value: q = A*0 = 0, x += 0, r -= 0, p = r (re-set by the solver anyway) */
+    (void)spmv(c, x, q);
+    (void)upd_xr(c, x, r, p, q, 0.0);
+    upd_p(c, q, q, 0.0);
+    if (cg1) (void)upd_cg1(c, x, r, p, s, q, 0.0, 0.0);
+    c->t_spmv = c->t_halo = c->t_reduce = c->t_vec = 0.0;
     MPI_Barrier(c->cart);
     const double t_setup = MPI_Wtime() - ts0;
 

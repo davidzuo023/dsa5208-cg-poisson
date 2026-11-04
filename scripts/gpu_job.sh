@@ -5,6 +5,7 @@
 # Tries the NVIDIA HPC SDK modules in order and keeps the first one whose build runs on the GPU.
 cd "$(dirname "$0")/.."
 export OMPI_MCA_btl_vader_single_copy_mechanism=none
+export UCX_TLS=^cma      # HPC-X/UCX: same ptrace restriction as Open MPI's CMA on the CPU nodes
 nvidia-smi || echo "WARNING: nvidia-smi failed"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
 # `module` is a shell function of the job shell; make sure this child shell has it too
@@ -26,7 +27,7 @@ for mod in nvhpc-hpcx-cuda12/26.1 nvhpc-hpcx-2.20-cuda12/26.1 nvhpc/24.5 nvhpc/2
     nvc -O3 -o $BIN/cg_serial src/cg_serial.c -lm || continue
     make -B BIN=$BIN GPUCC=mpicc GPUFLAGS="-O3 -mp=gpu -gpu=cc86 -Minfo=mp" $BIN/cg_gpu || continue
     # smoke test: OMP_TARGET_OFFLOAD=MANDATORY refuses to fall back to the host
-    if OMP_TARGET_OFFLOAD=MANDATORY mpirun -np 1 $BIN/cg_gpu -n 64; then ok=1; echo "== using $mod"; break; fi
+    if OMP_TARGET_OFFLOAD=MANDATORY mpirun -np 1 $BIN/cg_gpu -n 64; then ok=1; export GPU_MODULE=$mod; echo "== using $mod"; break; fi
     echo "-- $mod: GPU run failed"
 done
 (( ok )) || { echo "no working GPU toolchain found"; exit 1; }

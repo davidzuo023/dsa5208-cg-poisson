@@ -38,7 +38,10 @@ $(BIN)/stream_omp: $(SRC)/stream_omp.c | $(BIN)
 # Host-fallback test build without a GPU compiler:  make gpu GPUFLAGS="-O2 -fopenmp -foffload=disable"
 GPUCC    ?= mpicc
 GPUFLAGS ?= -O3 -mp=gpu -gpu=cc86 -Minfo=mp
-gpu: $(BIN)/cg_gpu $(BIN)/cg_serial
+# (always rebuilt, so a host-only build is never mistaken for a GPU build; scripts/gpu_job.sh
+#  builds the matching serial reference with `nvc -O3`)
+gpu: | $(BIN)
+	$(GPUCC) $(GPUFLAGS) -o $(BIN)/cg_gpu $(SRC)/cg_gpu.c $(LDLIBS)
 $(BIN)/cg_gpu: $(SRC)/cg_gpu.c $(SRC)/common.h | $(BIN)
 	$(GPUCC) $(GPUFLAGS) -o $@ $< $(LDLIBS)
 
