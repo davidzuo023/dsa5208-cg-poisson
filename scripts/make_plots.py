@@ -31,21 +31,29 @@ GEN = os.path.join(ROOT, "report", "generated")
 RES = os.path.join(ROOT, "results")
 
 # ---------------------------------------------------------------- style
-# report style: sans-serif, light full grid, framed legends, bold figure and panel titles
-C = ["#2b6ca8", "#e3792b", "#3a8f63", "#8467b0", "#d2504c", "#7f7f7f", "#b8860b", "#17becf"]
-INK, INK2, GRID = "#222222", "#444444", "#e3e3e3"
+# NeurIPS-style figures: the document's sans-serif face (Liberation Sans ~ Helvetica), open axes
+# (no top/right spines), faint horizontal grid only, frameless legends, thin marks, left-aligned
+# bold panel labels; figure titles live in the LaTeX captions, not in the figures.
+# Okabe-Ito colour-blind-safe palette in fixed order (checked with the dataviz palette validator;
+# every series also carries its own marker or line style)
+C = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#8c8c8c", "#56B4E9", "#F0E442"]
+INK, INK2, GRID = "#1a1a1a", "#555555", "#ebebeb"
 MARK = ["o", "s", "^", "D", "v", "P", "X", "*"]
 plt.rcParams.update({
-    "font.family": "DejaVu Sans", "font.size": 8, "axes.titlesize": 8.5, "axes.titleweight": "bold",
-    "axes.labelsize": 8, "legend.fontsize": 7, "xtick.labelsize": 7, "ytick.labelsize": 7,
-    "text.color": INK, "axes.labelcolor": INK, "xtick.color": INK2, "ytick.color": INK2,
-    "axes.edgecolor": "#b0b0b0", "axes.linewidth": 0.7, "axes.grid": True, "grid.color": GRID,
-    "grid.linewidth": 0.6, "grid.linestyle": "-", "axes.axisbelow": True, "axes.spines.top": True,
-    "axes.spines.right": True, "lines.linewidth": 1.6, "lines.markersize": 4.5,
-    "legend.frameon": True, "legend.framealpha": 1.0, "legend.edgecolor": "#cccccc",
-    "legend.fancybox": False, "figure.dpi": 150, "savefig.bbox": "tight", "pdf.fonttype": 42,
-    "xtick.major.size": 2.5, "ytick.major.size": 2.5,
+    "font.family": "sans-serif", "font.sans-serif": ["Liberation Sans", "Arial", "Helvetica", "DejaVu Sans"],
+    "font.size": 7.5, "axes.titlesize": 8, "axes.titleweight": "bold", "axes.titlelocation": "left",
+    "axes.titlepad": 5, "axes.labelsize": 7.5, "legend.fontsize": 6.8, "xtick.labelsize": 6.8,
+    "ytick.labelsize": 6.8, "text.color": INK, "axes.labelcolor": INK, "xtick.color": INK2, "ytick.color": INK2,
+    "axes.edgecolor": "#444444", "axes.linewidth": 0.6, "axes.spines.top": False, "axes.spines.right": False,
+    "axes.grid": True, "axes.grid.axis": "y", "grid.color": GRID, "grid.linewidth": 0.5, "grid.linestyle": "-",
+    "axes.axisbelow": True, "lines.linewidth": 1.3, "lines.markersize": 3.6, "lines.markeredgewidth": 0.8,
+    "legend.frameon": False, "legend.handlelength": 1.8, "legend.borderaxespad": 0.3, "legend.labelspacing": 0.35,
+    "xtick.major.size": 2.5, "ytick.major.size": 2.5, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
+    "xtick.direction": "out", "ytick.direction": "out", "figure.dpi": 150, "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.02, "pdf.fonttype": 42, "mathtext.fontset": "custom", "mathtext.rm": "Liberation Sans",
+    "mathtext.it": "Liberation Sans:italic", "mathtext.bf": "Liberation Sans:bold",
 })
+
 
 BYTES_CPU = 96.0   # classic CG per point and iteration: 88 B of loads/stores + 8 B write-allocate
 BYTES_GPU = 88.0   # GPUs write full sectors without reading them first: no write-allocate
@@ -53,13 +61,8 @@ A40_PEAK = 696.0   # GB/s, NVIDIA A40 data sheet
 
 
 def suptitle(fig, text, sub=None):
-    """bold figure title (and an optional grey subtitle) above all panels; call after tight_layout"""
-    h = fig.get_figheight()
-    y = 1.0 + 0.04 / h
-    if sub:
-        fig.text(0.5, y, sub, ha="center", va="bottom", fontsize=6.8, color="#666666")
-        y += 0.17 / h
-    fig.text(0.5, y, text, ha="center", va="bottom", fontsize=9, fontweight="bold")
+    """figure titles are carried by the LaTeX captions (NeurIPS style): nothing is drawn"""
+    return
 
 
 def save(fig, name):
@@ -175,14 +178,14 @@ def fig_sizes(d, macros, tables):
     ax[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     ax[0].xaxis.set_minor_formatter(NullFormatter())
     ax[0].legend(loc="upper left")
-    ax[1].plot(z.N0, z.iters, color=C[1], marker="s", label="measured")
+    ax[1].plot(z.N0, z.iters, color=C[0], marker="o", label="measured")
     k = float((z.iters / z.N0).iloc[-1])
     ax[1].plot(z.N0, k * z.N0, color=INK2, ls="--", lw=1.0, label=rf"${k:.2f}\,N$")
     ax[1].set_xlabel("grid points per direction $N$")
     ax[1].set_ylabel(r"iterations to $\varepsilon=10^{-8}$")
     ax[1].set_title("(b) Iterations")
     ax[1].legend(loc="upper left")
-    ax[2].loglog(z.N0, z.ts, color=C[2], marker="^", label="measured")
+    ax[2].loglog(z.N0, z.ts, color=C[0], marker="o", label="measured")
     ax[2].loglog(z.N0, z.ts.iloc[-1] * (z.N0 / z.N0.iloc[-1]) ** 4, color=INK2, ls="--", lw=1.0,
                  label=r"$\propto N^4$")
     ax[2].set_xlabel("grid points per direction $N$")
@@ -263,7 +266,7 @@ def fig_strong(b, t_ser, cpn, macros, tables):
     # where the time goes: share of each phase
     fig, ax = plt.subplots(figsize=(6.6, 2.35))
     comps = [("t_spmv_it", "stencil $A\\mathbf{p}$", C[0]), ("t_vec_it", "vector updates + local dots", C[2]),
-             ("t_halo_it", "halo exchange", C[1]), ("t_reduce_it", "MPI_Allreduce (incl. waiting)", C[3])]
+             ("t_halo_it", "halo exchange", C[1]), ("t_reduce_it", "MPI_Allreduce (incl. waiting)", C[4])]
     tot = sum(s[c] for c, _, _ in comps)
     xs = range(len(s))
     bottom = [0.0] * len(s)
@@ -348,7 +351,6 @@ def fig_bandwidth(s, stream, cpn, macros):
     plain_log(ax, "y", 0, 4)
     ax.set_xlabel("cores ($%d$ per node)" % cpn)
     ax.set_ylabel("DRAM bandwidth (GB/s)")
-    ax.set_title("Memory bandwidth: solver vs. STREAM")
     ax.legend(loc="upper left", fontsize=6.3)
     fig.tight_layout()
     save(fig, "bandwidth")
@@ -379,7 +381,6 @@ def fig_weak(b, cpn, macros):
     ax.set_ylim(0, 110)
     ax.set_xlabel("MPI processes $P$")
     ax.set_ylabel("weak-scaling efficiency (%)")
-    ax.set_title(f"Weak scaling, $\\approx{round(w.nloc_avg.iloc[0] ** (1 / 3))}^3$ points per process")
     ax.legend(loc="lower left", fontsize=6.5)
     fig.tight_layout()
     save(fig, "weak")
@@ -510,14 +511,13 @@ def fig_hybrid(b, macros, tables):
         return
     fig, ax = plt.subplots(figsize=(3.3, 2.3))
     labels = [f"{int(p)}$\\times${int(t)}" for p, t in zip(h.P, h['T'])]
-    ax.bar(range(len(h)), 1e3 * h.t_iter, color=C[0], width=0.6, label="best run")
-    ax.plot(range(len(h)), 1e3 * h.t_med, color=C[1], marker="D", ls="none", label="median run")
+    ax.bar(range(len(h)), 1e3 * h.t_iter, color=C[0], width=0.62, label="best run", edgecolor="none")
+    ax.plot(range(len(h)), 1e3 * h.t_med, color=C[3], marker="D", ls="none", ms=3.6, label="median run")
     ax.set_xticks(range(len(h)))
     ax.set_xticklabels(labels)
     ax.set_xlabel("MPI processes $\\times$ OpenMP threads")
     ax.set_ylabel("ms per iteration")
     ax.set_ylim(0, 1e3 * h.t_med.max() * 1.25)
-    ax.set_title(f"Processes × threads on {int(h.P.iloc[0] * h['T'].iloc[0])} cores")
     ax.grid(axis="x", visible=False)
     ax.legend(loc="upper left", fontsize=6.5, ncol=2)
     fig.tight_layout()
@@ -563,8 +563,8 @@ def fig_gpu(gdir, s, t_ser, macros, tables):
     plat = [("1 core", t_ser), ("1 socket\n(32 cores)", float(s[s.P == 32].t_iter.iloc[0])),
             ("1 A40", float(cg.loc[n512, "t_iter"])),
             ("8 nodes\n(256 cores)", float(s[s.P == s.P.max()].t_iter.iloc[0]))]
-    cols = [C[5], C[0], C[2], C[3]]
-    ax[1].bar(range(4), [1e3 * t for _, t in plat], color=cols, width=0.6)
+    cols = [C[5], C[0], C[2], C[4]]
+    ax[1].bar(range(4), [1e3 * t for _, t in plat], color=cols, width=0.6, edgecolor="none")
     for i, (_, t) in enumerate(plat):
         ax[1].text(i, 1e3 * t * 1.12, f"{1e3 * t:.1f}", ha="center", va="bottom", fontsize=6.8)
     ax[1].set_yscale("log")
