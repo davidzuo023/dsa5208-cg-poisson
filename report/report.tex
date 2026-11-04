@@ -46,7 +46,7 @@
 \begin{center}
 {\LARGE\bfseries Scaling Conjugate Gradients with MPI and OpenMP\par}
 \vspace{4pt}
-{\large Decomposition, communication hiding and memory bandwidth in a matrix-free 3D Poisson solver\par}
+{\large Decomposition, communication hiding, memory bandwidth and GPU offload in a matrix-free 3D Poisson solver\par}
 \vspace{10pt}
 \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}ccc}
 WU YUHAN (A0351706H) & ZUO DEWEI (A0352507H) & ZHU CHEN (A0357394N)
@@ -61,16 +61,19 @@ DSA5208 $\cdot$ Project 3\par
 The Conjugate Gradient (CG) method is the standard solver for the symmetric positive definite systems
 produced by elliptic partial differential equations, and it is notoriously hard to scale: every iteration
 needs a nearest-neighbour exchange, two global reductions and a full sweep through memory. We build a
-matrix-free hybrid MPI\,+\,OpenMP CG solver for the 3D Poisson equation in which the four central
-parallelisation decisions---domain decomposition, halo exchange, reduction strategy and the split between
-processes and threads---are run-time switches, and measure each of them on the NUS Vanda cluster. The solver
-reproduces the serial solution to \ValWorstCG{} in \ValRuns{} parallel configurations and converges at the
-theoretical second order. On 36 cores of a Vanda node it reaches a speedup of \SpeedupPmax{} on a $512^3$
-grid and sustains \CGbwAll\,GB/s, 70\% of the node's STREAM bandwidth: inside a node, CG scales exactly as
-far as memory bandwidth does. A memory-traffic model predicts the design trade-offs: pipelined CG pays its
-36\% traffic surcharge almost in full (\RelPipe$\times$ measured) and leaves its true residual
-\SolvePipeRatio{} times above the tolerance, slabs fall 13\% behind blocks, overlapped halos only pay across a
-network, and the global reductions act mainly as barriers that turn bandwidth imbalance into waiting.
+matrix-free CG solver for the 3D Poisson equation in three versions---serial, hybrid MPI\,+\,OpenMP, and
+MPI\,+\,OpenMP target offload to GPUs---in which domain decomposition, halo exchange, reduction strategy and
+the split between processes and threads are run-time switches, and measure each choice on the NUS Vanda
+cluster from one core to \Pmax{} cores on \NodesMax{} nodes and on an NVIDIA A40. The solver reproduces the
+serial solution to \ValWorstCG{} in \ValRuns{} CPU and \GpuValRuns{} GPU configurations and converges at
+the theoretical second order. Inside a socket CG scales exactly as far as memory bandwidth does: 32 cores
+reach a speedup of \SpeedupNode{} and \CGbwFrac\% of the STREAM bandwidth. Across nodes every socket
+brings its own memory, and \Pmax{} cores run a $512^3$ iteration in \TiterPmax\,ms, a speedup of
+\SpeedupPmax{} with \NodeEffPmax\% efficiency relative to one node (\NodeEffTwoPmax\% for $768^3$) and
+\WeakNodeEff\% weak-scaling efficiency on 1.8 billion unknowns. At that scale the global reductions, not the
+halo messages, cost most: they take \RedFracPmax\% of an iteration, almost all of it waiting at a barrier.
+Merging the two reductions saves 5\%, pipelining them costs more memory traffic than it hides, and one A40
+matches \GpuVsSocket{} CPU sockets.
 
 \section{Introduction}\label{sec:intro}
 
@@ -81,8 +84,9 @@ spectral clustering all reduce to a Poisson-type equation that has to be solved 
 or outer iteration. Discretising $-\nabla^2u=f$ on a cube with $N$ grid points per direction yields
 $N^3$ unknowns, and refining the grid makes the problem harder twice over: the system grows like $N^3$,
 and the number of iterations of a Krylov solver grows like $N$, so the total work grows like $N^4$. A
-$512^3$ grid already holds 134 million unknowns and needs about two thousand CG iterations. Solving such
-problems in reasonable time and memory requires distributing them across many nodes.
+$512^3$ grid already holds 134 million unknowns, needs about two thousand CG iterations and takes
+\SzSolveMaxMin{} minutes on one core. Solving such problems in reasonable time and memory requires
+distributing them across many nodes.
 
 The Conjugate Gradient method is the method of choice for these symmetric positive definite systems, and
 it is also a standard stress test for parallel computers: the HPCG benchmark~[4], which complements LINPACK
@@ -105,16 +109,19 @@ does not destroy cache locality. Algebraic reformulations of CG merge the two re
 overlap the reduction with the matrix--vector product, at the price of extra vectors, extra memory
 traffic and weaker numerical stability. OpenMP threads inside each MPI process cut the number of messages
 and of reduction participants, at the price of fork--join overhead and threads that idle while the master
-thread communicates.
+thread communicates. A GPU changes the balance again: it offers several times the memory bandwidth of a
+CPU socket, but every value that crosses the PCIe bus to reach the network costs more than it costs on the
+host.
 
-This project implements a serial reference solver and a hybrid MPI\,+\,OpenMP solver in C in which each of
-these choices is a run-time switch, so that its effect is measured in isolation on an identical problem.
-We validate the parallel solver point by point against the serial one in \ValRuns{} configurations and
-against an analytical solution, derive a performance model from memory traffic and communication volume,
-and instrument the solver with per-phase timers and byte counters that explain the measured scaling
-rather than merely report it. \Cref{sec:algorithm} introduces the problem and the algorithm,
-\cref{sec:design} develops the parallel design and the performance model, \cref{sec:validation} validates
-the implementation and \cref{sec:perf} analyses its performance.
+This project implements a serial reference solver, a hybrid MPI\,+\,OpenMP solver and an MPI\,+\,OpenMP
+offload solver in C, with each design choice a run-time switch so that its effect is measured in isolation
+on an identical problem. We validate the parallel solvers point by point against the serial one and against
+an analytical solution, derive a performance model from memory traffic and communication volume, and
+instrument the solvers with per-phase timers and byte counters that explain the measured scaling rather
+than merely report it. \Cref{sec:algorithm} introduces the problem and the algorithm, \cref{sec:design}
+develops the parallel design and the performance model, \cref{sec:validation} validates the
+implementation and \cref{sec:perf} analyses its performance from one core to \NodesMax{} nodes and on a
+GPU.
 
 \section{The model problem and the Conjugate Gradient method}\label{sec:algorithm}
 
@@ -131,8 +138,8 @@ $(u_{i-1}-2u_i+u_{i+1})/h^2$ and multiplying by $h^2$ gives the linear system $A
 \end{aligned}
 \end{equation}
 where values with an index equal to $0$ or $N+1$ are boundary values and therefore zero. The matrix
-$A\in\mathbb{R}^{N^3\times N^3}$ is symmetric positive definite with condition number
-$\kappa(A)\approx 4/(\pi^2h^2)$. We never assemble $A$: it is applied as the 7-point stencil
+$A\in\mathbb{R}^{N^3\times N^3}$ is symmetric positive definite, has $7N^3-6N^2$ nonzeros and condition
+number $\kappa(A)\approx 4/(\pi^2h^2)$. We never assemble $A$: it is applied as the 7-point stencil
 \eqref{eq:stencil} (\emph{matrix-free}), so memory consumption and memory traffic are entirely those of
 the vectors.
 
@@ -148,13 +155,13 @@ search directions $\vb p_k$; the step length $\alpha_k$ minimises the $A$-norm o
 $\vb p_k$, and $\beta_{k+1}$ keeps the new direction $A$-conjugate to all previous ones. The scalar
 $\gamma_k=\|\vb r_k\|^2$ doubles as the stopping criterion with relative tolerance $\varepsilon$. The
 error contracts by roughly $(\sqrt{\kappa}-1)/(\sqrt{\kappa}+1)$ per iteration, so the number of
-iterations to reach a fixed $\varepsilon$ grows like $\sqrt{\kappa}\propto 1/h\propto N$. Our runs
-confirm this: \ValIters{} iterations for $N=\ValN$ and \SolveIters{} for $N=\NS$ at $\varepsilon=10^{-8}$,
-close to the ratio of the grid sizes. One iteration consists of one stencil application, two inner products
-and three vector updates. Per grid point the stencil costs 7 floating-point operations, its inner product 2
-and the updates 8, i.e.\ 17 flops, against 11 loads and stores of 8-byte values (88 bytes, see
-\cref{sec:model}). At 0.2 flop/byte this is an order of magnitude below the balance of current server
-processors, so CG runs at the speed of memory, not of arithmetic.
+iterations to reach a fixed $\varepsilon$ grows like $\sqrt{\kappa}\propto 1/h\propto N$; our runs need
+\SzItPerN$\,N$ iterations at $\varepsilon=10^{-8}$ (\cref{sec:serial}). One iteration consists of one
+stencil application, two inner products and three vector updates. Per grid point the stencil costs 7
+floating-point operations, its inner product 2 and the updates 8, i.e.\ 17 flops, against 11 loads and
+stores of 8-byte values (88 bytes, see \cref{sec:model}). At 0.2 flop/byte this is an order of magnitude
+below the balance of current server processors and GPUs, so CG runs at the speed of memory, not of
+arithmetic.
 
 \begin{algorithm}[htb]
 \caption{Conjugate Gradients for $A\vb x=\vb b$ with $\vb x_0=0$. Framed comments mark the points where a
@@ -175,7 +182,7 @@ parallel implementation must communicate.}\label{alg:cg}
 The parallel solver distributes the grid over $P$ MPI processes and runs $T$ OpenMP threads inside each.
 This section follows the data through one iteration: how the grid is partitioned, how boundary values
 travel between processes, how the global reductions are organised and how the threads share the local
-work. It closes with a cost model that ties these decisions together.
+work. It then describes the GPU version and closes with a cost model that ties these decisions together.
 
 \subsection{Data distribution}\label{sec:decomp}
 The processes form a Cartesian grid $p_x\times p_y\times p_z=P$ created by \code{MPI\_Dims\_create} and
@@ -224,16 +231,16 @@ posts \code{MPI\_Irecv} for all faces, packs, posts \code{MPI\_Isend}, applies t
 waits for the messages, unpacks and finally applies the stencil to the remaining boundary shell. The shell
 is covered by disjoint pieces---two $i$-planes, two $j$-rows inside them, two $k$-columns inside those---so
 the fused inner product counts every point exactly once. Making this overlap effective took two further
-steps. The first concerns progress: most MPI libraries, Open MPI over TCP included, move data only inside
-MPI calls, and large faces use a rendezvous protocol whose handshake cannot complete while the process
-computes. The solver therefore splits the interior sweep into chunks of $i$-planes (four by default) and
-calls \code{MPI\_Testall} between them, which advances the transfers during the computation. The second
-concerns locality. Our first version deferred the shell layers on all six sides, so with slabs every
-process handled its $k=1$ and $k=n_z$ columns as isolated, strided points even though these lie on the
-physical boundary and need no communication. This cost 10--15\% per iteration in our measurements and made
-the overlapped mode slower than the blocking one. Restricting the deferred shell to layers that face an
-actual neighbour removed this penalty; what remains is the cost of the second pass over the shell, which
-pays off only when messages take real time (\cref{sec:variants}).
+steps. The first concerns progress: most MPI libraries move data only inside MPI calls, and large faces
+use a rendezvous protocol whose handshake cannot complete while the process computes. The solver therefore
+splits the interior sweep into chunks of $i$-planes (four by default) and calls \code{MPI\_Testall}
+between them, which advances the transfers during the computation. The second concerns locality. Our first
+version deferred the shell layers on all six sides, so with slabs every process handled its $k=1$ and
+$k=n_z$ columns as isolated, strided points even though these lie on the physical boundary and need no
+communication. This cost 10--15\% per iteration and made the overlapped mode slower than the blocking one.
+Restricting the deferred shell to layers that face an actual neighbour removed this penalty; what remains
+is the cost of the second pass over the shell, which pays off only when messages take longer than that
+pass (\cref{sec:variants}).
 
 \subsection{Global reductions and three formulations of CG}\label{sec:reductions}
 Classic CG (\cref{alg:cg}) performs two \code{MPI\_Allreduce} operations per iteration on a single value
@@ -278,6 +285,21 @@ participants and the ghost memory; in exchange every kernel pays a fork--join (f
 iteration with blocking halos, up to about fifteen with overlap), and the worker threads idle while the
 master thread waits in MPI.
 
+\subsection{Offloading to GPUs}\label{sec:gpu-design}
+The GPU solver (\code{src/cg\_gpu.c}) keeps the decomposition and the MPI structure of the CPU code and
+replaces the threads of each process by one GPU: OpenMP is used for target offload, the ``X'' of
+MPI\,+\,X. Processes on a node take consecutive devices (\code{omp\_set\_default\_device} on the node-local
+rank). All vectors are allocated in GPU memory once, with \code{omp target enter data}, and never leave it
+during the solve, because a single transfer of one vector over PCIe would cost more than a whole iteration
+on the device. Every kernel---stencil with fused inner product, fused vector updates, face packing and
+unpacking---is an \code{omp target teams distribute parallel for collapse(3)} loop over data that is
+already present, and inner products are OpenMP reductions on the device followed by \code{MPI\_Allreduce}
+on the host. The halo exchange packs each face on the GPU, copies only the packed faces to host buffers
+(\code{omp target update}), exchanges them with \code{MPI\_Sendrecv} and copies them back for unpacking, so
+the bus carries $V$ values per iteration instead of whole vectors. Classic CG and CG1 are available. Every
+kernel is launched once before the clock starts, so the one-off kernel loading of the CUDA runtime is not
+charged to the iteration.
+
 \subsection{Performance model}\label{sec:model}
 The decisions above enter the time per iteration through four terms,
 \begin{equation}\label{eq:model}
@@ -287,10 +309,13 @@ where $B_v$ is the memory traffic per grid point of the CG variant (\cref{tab:va
 memory bandwidth available to one process when $P$ processes share the hardware, $m$ and $V$ the message
 count and halo volume of the busiest process from \eqref{eq:volume}, $t_s$ the latency of a message,
 $t_w$ the transfer time per value, and $\rho$ the number of reductions per iteration that are not hidden.
-$B_v$ counts explicit loads and stores in the convention of the STREAM benchmark~[5], assuming that the stencil's neighbour
-values are reused from cache. For classic CG the stencil reads $\vb p$ and writes $\vb q$, the $\vb x,\vb r$
-update reads four vectors and writes two, and the $\vb p$ update reads two and writes one: $2+6+3=11$
-accesses, or 88 bytes. Fusing the two inner products into these sweeps avoids three further reads.
+$B_v$ counts explicit loads and stores in the convention of the STREAM benchmark~[5], assuming that the
+stencil's neighbour values are reused from cache. For classic CG the stencil reads $\vb p$ and writes $\vb
+q$, the $\vb x,\vb r$ update reads four vectors and writes two, and the $\vb p$ update reads two and writes
+one: $2+6+3=11$ accesses, or 88 bytes. Fusing the two inner products into these sweeps avoids three further
+reads. On a CPU the stencil's pure write of $\vb q$ first loads the cache line (\emph{write-allocate}), which
+adds 8 bytes; we therefore convert times into DRAM bandwidth with 96 bytes per point on the CPU and 88 on
+the GPU, whose caches write full sectors without reading them.
 
 \begin{table}[t]
 \centering\small
@@ -308,7 +333,7 @@ pipelined CG & 0 (overlapped) & 2 & 7 & 120 \\
 
 The model makes the scaling behaviour explicit. The memory term falls like $1/P$ only while $b(P)$ stays
 constant, that is, until the processes on a socket saturate its memory bandwidth; from then on adding
-cores on the same node gains nothing, while adding nodes adds bandwidth. The halo term falls like
+cores on the same socket gains nothing, while adding nodes adds bandwidth. The halo term falls like
 $P^{-2/3}$ for blocks and not at all for slabs. The reduction term grows with $\log_2P$ and is the only
 term that grows, so it eventually dominates every strong-scaling run. CG1 halves it at no cost in $B_v$,
 and pipelined CG removes it at a 36\% higher $B_v$, which pays off once the hidden latency exceeds the extra
@@ -316,9 +341,10 @@ memory time.
 
 \section{Validation}\label{sec:validation}
 
-We validate the solver at three levels: agreement with the serial code, convergence to the exact solution,
-and attainable accuracy. The script \code{scripts/validate.sh full} runs all tests and
-\code{scripts/check\_validation.py} evaluates them; all of them pass.
+We validate the solvers at three levels: agreement with the serial code, convergence to the exact
+solution, and attainable accuracy. The script \code{scripts/validate.sh full} runs all CPU tests and
+\code{scripts/check\_validation.py} evaluates them; \code{scripts/run\_gpu.sh} repeats the first level on
+the GPU. All tests pass.
 
 The first level compares every parallel configuration with the serial solver point by point. We ran all
 combinations of the three CG variants, the two halo modes and the three decompositions on
@@ -332,9 +358,12 @@ they need exactly the serial number of iterations (\ValIters). Pipelined CG agre
 effect of its extra recurrences and still seven orders of magnitude below the discretisation error
 (\ValErrMax). A further \ValEdge{} runs cover the corner cases of the shell decomposition of
 \cref{sec:halo}---one-plane slabs, two-point blocks, $N=7$ on six processes and $N=2$ on two---and all
-reproduce the serial solution to rounding level. The quick validation suite was repeated inside the Vanda job before the benchmarks
-(36 variant runs, 12 edge cases and the grid study) and passes with the same worst differences, $3.8\times10^{-15}$
-and $2.0\times10^{-12}$.
+reproduce the serial solution to rounding level. On Vanda the quick suite (\NodeValRuns{} variant runs,
+\NodeValEdge{} edge cases and the grid study) ran on a 32-core \NodeCPU{} node and \NodeValResult{} with
+the same worst differences, \NodeValCG{} and \NodeValPipe. The GPU solver ran CG and CG1 on $P=\GpuValP$
+processes sharing one A40, so that the $P=8$ runs exchange halos in all three directions through device
+packing, host staging and MPI; all \GpuValRuns{} runs need 146 iterations and agree with the serial solution
+to \GpuValWorst.
 
 \begin{table}[htb]
 \centering\small
@@ -377,7 +406,7 @@ rounding errors in $\vb x$ dominate. Pipelined CG follows them until the two res
 continues its recursive residual stagnates while the true residual drifts back up to \FinalPipe{} after
 \LastPipe{} iterations. This is the residual gap of pipelined Krylov methods: latency hiding costs
 numerical robustness. On the $\ValN^3$ validation grid all three variants still meet $\varepsilon=10^{-8}$
-(\cref{tab:validation}), but the gap grows with the problem: on the $\NS^3$ grid of \cref{sec:weak} the
+(\cref{tab:validation}), but the gap grows with the problem: on the $\NS^3$ grid of \cref{sec:solve} the
 true residual of pipelined CG ends at \SolvePipeRatio{} times the tolerance its recursive residual reports.
 Production use of the pipelined variant therefore needs residual replacement, i.e.\ periodically
 recomputing $\vb r=\vb b-A\vb x$ and $\vb w=A\vb r$ explicitly.
@@ -393,82 +422,161 @@ $N=64$, $P=4$; the CG and CG1 curves coincide.}\label{fig:validation}
 \section{Performance}\label{sec:perf}
 
 \paragraph{Setup.}
-All measurements in this section were taken on one compute node of the NUS Vanda cluster, submitted
-through PBS Pro to the \code{auto\_free} queue. The node carries two \MachineCPU{} processors with 32
-cores each, 120\,MB of last-level cache and two NUMA domains; the job owned \MachineCores{} of its 64
-cores, so its processes span both sockets. The code was built with GCC \MachineGCC{}
-(\code{-O3 -march=native -fopenmp}) and run with \MachineMPI{}, every process pinned to its own cores.
-Strong-scaling runs use $N=\NS$, i.e.\ \NSdofs{} million unknowns and four to seven vectors of 1.07\,GB
-each, more than thirty times the cache. Each timing run performs exactly \Iters{} iterations of the
-steady-state loop: work vectors are allocated before the clock starts, and the one-off setup stencil
-application of CG1 and pipelined CG counts in the time to solution (\cref{tab:solve}) but not in the time
-per iteration. Every configuration was run \Reps{} times, interleaved with the others, and the fastest run
-is reported; the median spread between repetitions was \MedSpread\%, so differences of a few percent are
-real. Speedups refer to the serial code; the parallel code on one process is \PoneComparison{} the serial
-code, the price of its halo machinery and OpenMP regions.
+All measurements were taken on the NUS Vanda cluster through PBS Pro. A Vanda CPU node carries two
+\MachineCPU{} processors with \MachineCPS{} cores each and two NUMA domains. The multi-node job requested
+\MachineNodes{} chunks of \MachineCPN{} cores on \MachineNodes{} different nodes; on every node PBS assigned
+the same \MachineCPN{} odd-numbered cores, all on one socket, so each node contributes exactly one socket and its memory
+controllers, and the job is a clean model of a cluster of \MachineCPN-core nodes. MPI processes on remote
+nodes were started through PBS (\code{pbs\_tmrsh}), which keeps them inside the job's CPU set, and every
+process was pinned to its own core. The code was built with GCC \MachineGCC{} (\code{-O3 -march=native
+-fopenmp}) and run with \MachineMPI. Strong-scaling runs use $N=\NS$ (\NSdofs{} million unknowns, four to
+seven vectors of 1.07\,GB) and $N=\NStwo$ (\NStwoDofs{} million unknowns), weak-scaling runs
+$\WeakLocal^3$ points per process. Each timing run performs exactly \Iters{} iterations of the steady-state
+loop; work vectors are allocated before the clock starts, and the one-off setup stencil application of CG1
+and pipelined CG counts in the time to solution but not in the time per iteration. Every configuration ran
+\Reps{} times, interleaved with the others, and we report the fastest run. The median spread between
+repetitions is \MedSpread\%, but the nodes are shared with other users' jobs, and a few multi-node runs
+caught a slow node or a busy network and took up to \MaxSpread\% longer; the fastest run is the one that
+measures the code. The GPU runs used one \GpuName{} (\GpuMem\,GB, driver \GpuDriver) on a Vanda GPU node,
+compiled with \code{nvc} \GpuNVC{} of the NVIDIA HPC SDK (\code{-O3 -mp=gpu -gpu=cc86}).
 
-\subsection{Strong scaling and the memory-bandwidth wall}\label{sec:strong}
+\subsection{Serial baseline and problem size}\label{sec:serial}
 
-\Cref{fig:strong} and \cref{tab:strong} show the baseline: pure MPI, blocks, overlapped halo and classic
-CG. A serial iteration takes \SerialTiter\,ms. Up to four processes the speedup is close to ideal, 3.67 on
-four processes at 92\% efficiency. From eight processes on it flattens: 5.8 on eight, 7.2 on sixteen and
-\SpeedupPmax{} on \Pmax{} processes, a parallel efficiency of \EffPmax\%. Communication volume does not
-explain this. The busiest process sends 1.1\,MiB per iteration at $P=\Pmax$, and halo exchange plus
-reductions stay below 8\% of the iteration up to $P=32$. The limit is memory bandwidth.
+\Cref{fig:sizes} and \cref{tab:sizes} run the serial solver on one core for $N=\SzNmin$ to $\SzNmax$, so
+the matrix dimension grows from $0.26$ to $134$ million and the number of nonzeros from $1.8$ to $938$
+million. The time per iteration grows like $N^{\SzSlopeIter}$, i.e.\ linearly in the number of unknowns, as
+expected for a matrix-free method whose every kernel is a sweep over the vectors. The cost per grid point
+is the more telling quantity. At $N=\SzNmin$ the five vectors occupy 10\,MB and fit into the processor
+caches, and an update costs \SzNsSmall\,ns; from $N=128$ on the vectors live in DRAM and the cost settles
+near \SzNsLarge\,ns, which corresponds to \SzBwLarge\,GB/s of memory traffic---the bandwidth one core can
+draw (\cref{sec:strong}). The iteration count grows linearly in $N$, from \SzItMin{} to \SzItMax{}
+iterations ($\approx\SzItPerN\,N$), so the time to solution grows like $N^{\SzSlopeSolve}$ and reaches
+\SzSolveMax\,s on the $512^3$ grid. Doubling the resolution makes the solve sixteen times more expensive;
+this is the work that the parallel solver has to distribute. The serial run on the $512^3$ grid that the
+speedups below refer to was repeated on a \NodeCPU{} node and takes \SerialTiter\,ms per iteration.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\linewidth]{strong}
-\caption{Strong scaling of the baseline (pure MPI, 3D blocks, overlapped halo, classic CG), $N=\NS^3$, on
-one Vanda node.}\label{fig:strong}
+\includegraphics[width=\linewidth]{sizes}
+\caption{Serial solver on one core of a \SizesCPU{} node. (a) Time per iteration against the matrix
+dimension; (b) iterations to $\varepsilon=10^{-8}$; (c) time to solution. Dashed lines are the expected
+power laws.}\label{fig:sizes}
 \end{figure}
 
 \begin{table}[t]
 \centering\small
-\caption{Strong scaling, $N=\NS^3$, \Iters{} iterations. ``comm'' is the share of an iteration spent in
-halo exchange and reductions, including the time processes wait there for slower ones; MLUP/s is millions of
-grid-point updates per second.}\label{tab:strong}
-\begin{tabular}{rcrrrrr}
+\caption{Serial problem-size study: unknowns and nonzeros (millions), memory of the five vectors (MiB),
+time per iteration (best of 3 runs of 20 iterations), cost per grid point, effective DRAM bandwidth (96
+B/point), iterations and time to $\varepsilon=10^{-8}$, and the maximum error against the exact
+solution.}\label{tab:sizes}
+\begin{tabular}{rrrrrrrrrc}
 \toprule
-$P$ & process grid & ms / iteration & speedup & efficiency (\%) & comm (\%) & MLUP/s \\
+$N$ & unknowns & nonzeros & MiB & ms/iter & ns/point & GB/s & iterations & solve (s) & max error \\
+\midrule
+\tabinput{generated/tab_sizes.tex}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Strong scaling from one core to \NodesMax{} nodes}\label{sec:strong}
+
+\Cref{fig:strong} and \cref{tab:strong} show the baseline configuration: pure MPI, blocks, overlapped halo
+and classic CG, \MachineCPN{} processes per node. The parallel code on one process is \PoneVsSerial\%
+\PoneFaster{} than the serial code, so the parallel machinery costs nothing. The curve has two regimes
+separated by the node boundary.
+
+Inside one socket the speedup is ideal up to four processes (\SpeedupFour, \EffFour\% efficiency) and then
+flattens: \SpeedupEight{} on eight processes and \SpeedupNode{} on 32, an efficiency of \EffNode\%.
+Communication does not explain this, because halo exchange and reductions take \CommFracNode\% of the
+iteration at $P=32$. \Cref{fig:bandwidth} converts the time per iteration into DRAM traffic with the
+96-byte model of \cref{sec:model} and compares it with the STREAM triad counted the same way. One core
+moves \CGbwOne\,GB/s, more than STREAM on one core (\StreamOne\,GB/s), whose single stream of
+prefetches draws less than the solver's several concurrent streams. STREAM grows linearly to eight
+threads and then saturates, and the solver follows the same curve to \CGbwNode\,GB/s on 32 cores,
+\CGbwFrac\% of the socket's STREAM bandwidth (\StreamAll\,GB/s). Cores added after the memory controllers
+saturate have nothing to compute on: inside a socket the speedup of CG is the bandwidth speedup.
+
+Across nodes the picture reverses, because every node adds a socket's worth of memory bandwidth. Going
+from one node to two cuts the iteration from \TiterNode{} to \TiterSixtyFour\,ms (\NodeEffSixtyFour\% node-level
+efficiency), and \NodesMax{} nodes reach \TiterPmax\,ms, \NodeSpeedPmax{} times faster than one node
+(\NodeEffPmax\% efficiency) and \SpeedupPmax{} times faster than the serial code. The aggregate traffic
+rises to \CGbwAll\,GB/s, \CGbwTB\,TB/s, close to the dotted line of \cref{fig:bandwidth} that multiplies
+the bandwidth of one socket by the number of nodes. On the larger $\NStwo^3$ grid, where each process
+owns 3.4 times more points but sends only 2.25 times more halo data, \NodesMax{} nodes are \NodeSpeedTwoPmax{} times faster
+than one (\TiterTwoNode{} to \TiterTwoPmax\,ms), \NodeEffTwoPmax\% efficiency. The efficiency that is lost
+across nodes is lost to communication, which \cref{sec:comm} dissects.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{strong}
+\caption{Strong scaling of the baseline (pure MPI, 3D blocks, overlapped halo, classic CG), 32 processes
+per node. $512^3$: speedup and efficiency relative to the serial code (solid) and relative to one node
+(dashed, $32\,t_{32}/(P\,t_P)$); $768^3$: relative to one node.}\label{fig:strong}
+\end{figure}
+
+\begin{table}[t]
+\centering\small\setlength{\tabcolsep}{4.5pt}
+\caption{Strong scaling, \Iters{} iterations. ``eff'' is $S(P)/P$ relative to the serial code, ``node eff''
+relative to one node; ``comm'' is the share of the iteration spent in halo exchange and reductions,
+including waiting; ``halo'' is the data sent by the busiest process per iteration.}\label{tab:strong}
+\begin{tabular}{rrcrrrrrrrr}
+\toprule
+ & & & \multicolumn{6}{c}{$N=\NS^3$} & \multicolumn{2}{c}{$N=\NStwo^3$}\\
+\cmidrule(lr){4-9}\cmidrule(lr){10-11}
+$P$ & nodes & process grid & ms/iter & speedup & eff (\%) & node eff (\%) & comm (\%) & halo (KiB) & ms/iter & node eff (\%) \\
 \midrule
 \tabinput{generated/tab_strong.tex}
 \bottomrule
 \end{tabular}
 \end{table}
 
-\Cref{fig:bandwidth} converts the measured time per iteration into DRAM traffic with the 96-byte model of
-\cref{sec:model} (88 bytes of explicit loads and stores plus the write-allocate of the stencil output) and
-compares it with the STREAM triad counted the same way. One core moves \CGbwOne\,GB/s, more than
-STREAM on that core (\StreamOne\,GB/s). STREAM itself grows linearly up to eight threads and then
-saturates: from 16 to 36 threads it gains only 21\%. The solver follows the same curve and reaches
-\CGbwAll\,GB/s on \Pmax{} cores, 70\% of the node's STREAM bandwidth (\StreamAll\,GB/s). Inside a node the
-speedup of CG is the bandwidth speedup; cores added after the memory controllers saturate have nothing to
-compute on. The kernel fusions of \cref{sec:model} are correspondingly decisive, because every memory
-access they remove is a direct reduction in run time.
-
 \begin{figure}[t]
 \centering
 \begin{minipage}[t]{0.49\linewidth}\centering
 \includegraphics[width=\linewidth]{bandwidth}
-\caption{DRAM traffic rate of the CG baseline (96 bytes per point and iteration) against the STREAM triad
-(32 bytes per element), both including write-allocate traffic.}\label{fig:bandwidth}
+\caption{DRAM traffic of the $512^3$ baseline (96 bytes per point and iteration) against the STREAM triad
+of one socket (32 bytes per element); the dotted line multiplies the socket's STREAM bandwidth by the
+number of nodes.}\label{fig:bandwidth}
 \end{minipage}\hfill
 \begin{minipage}[t]{0.49\linewidth}\centering
 \includegraphics[width=\linewidth]{weak}
-\caption{Weak scaling: time per grid point and iteration relative to one process.}\label{fig:weak}
+\caption{Weak scaling with $\approx\WeakLocal^3$ points per process: time per grid point and iteration
+relative to one process and relative to one full node.}\label{fig:weak}
 \end{minipage}
 \end{figure}
 
-The breakdown in \cref{fig:breakdown} shows where the bandwidth goes. The vector updates take
-\VecFracSerial\% of a single-process iteration, more than the stencil, because they account for nine of the eleven
-memory accesses per point while doing almost no arithmetic. Through $P=32$ the communication phases stay
-thin. At $P=\Pmax$ the picture changes: the reductions absorb 30\,ms of a 54.5\,ms iteration. This is
-waiting, not data movement, since an \code{MPI\_Allreduce} of one value takes microseconds inside a node.
-The job's 36 cores necessarily span both 32-core sockets, unevenly, so the processes on the less crowded
-socket get more memory bandwidth, finish their sweeps early and wait at the next reduction for the
-processes on the crowded one. The global reductions turn bandwidth imbalance into idle time, exactly the
-barrier effect described in \cref{sec:intro}.
+\subsection{Where the communication time goes}\label{sec:comm}
+
+The breakdown in \cref{fig:breakdown} splits each iteration into its four phases. On one process the
+vector updates take \VecFracSerial\% of the time, more than the stencil, because they account for nine of
+the eleven memory accesses per point while doing almost no arithmetic. Inside the node the communication
+phases stay thin. Beyond it they grow with every node, and at $P=\Pmax$ they take \CommFracPmax\% of the
+iteration.
+
+The two kinds of communication behave very differently. The halo exchange is cheap: at $P=\Pmax$ the
+busiest process sends \HaloKiBPmax\,KiB per iteration in six messages, which the network delivers in a few
+tens of microseconds, and the whole phase, including face packing and unpacking, costs \HaloMsPmax\,ms or
+\HaloFracPmax\% of the iteration. The reductions are expensive: they take \RedMsPmax\,ms, \RedFracPmax\%
+of the iteration, although the two \code{MPI\_Allreduce} calls move 16 bytes and a reduction over 256
+processes needs only about $\lceil\log_2 256\rceil=8$ network latencies, a few tens of microseconds. The
+rest is waiting. Every process has the same amount of work (the $8\times8\times4$ process grid divides
+$512^3$ evenly), but every process also shares its socket's memory bandwidth with 31 others and its node
+with other jobs, so in each iteration some process finishes its sweep late, and the reduction makes all
+\Pmax{} processes wait for it. On one node this barrier effect costs \RedMsNode\,ms per iteration; across
+\NodesMax{} nodes, where the slowest of eight sockets sets the pace, it costs \RedMsPmax\,ms. The global
+reductions, not the halo messages, are what limits strong scaling across nodes, and they act as barriers
+far more than as messages.
+
+Weak scaling (\cref{fig:weak}) separates the two regimes cleanly. With \WeakLocal$^3$ points per process
+one process completes an iteration in \WeakTone\,ms, drawing \WeakBwOne\,GB/s. Thirty-two processes on one
+socket need \WeakTnode\,ms for 32 times the data, because they share the bandwidth (\WeakBwNode\,GB/s each);
+the efficiency relative to one process falls to \WeakEffNode\%, the bandwidth wall again. From one node to
+\WeakPmax{} processes on \NodesMax{} nodes, where each node brings its own memory, the time grows only from
+\WeakTnode{} to \WeakTmax\,ms while the problem grows to $\WeakNmax^3$, \WeakDofsMax{} billion unknowns: a
+node-level weak-scaling efficiency of \WeakNodeEff\%. The missing fifth is the halo and reduction cost of
+\eqref{eq:model}. Weak scaling of the time per iteration also flatters the algorithm: the iteration
+count grows like $N\propto P^{1/3}$, so the time to solution grows by the same factor even when every
+iteration scales perfectly, a growth that only a better preconditioner removes.
 
 \begin{figure}[t]
 \centering
@@ -478,70 +586,77 @@ reductions (each phase timed as the maximum over processes; the reduction time i
 processes; absolute times in \cref{tab:strong}).}\label{fig:breakdown}
 \end{figure}
 
-\subsection{Effect of the design choices}\label{sec:variants}
+\subsection{Effect of the design choices across nodes}\label{sec:variants}
 
-\Cref{fig:variants} and \cref{tab:variants} vary one decision at a time around the baseline and report the
-time per iteration relative to the baseline at the same $P$. Three results stand out.
+\Cref{fig:variants} and \cref{tab:variants} vary one decision at a time around the baseline on one to
+\NodesMax{} nodes and report the time per iteration relative to the baseline at the same $P$.
 
-The CG formulations follow the traffic model quantitatively. Pipelined CG moves 120 instead of 88 bytes
-per point, a ratio of 1.36. Its measured cost rises from 1.11 times the baseline on four processes to
-\RelPipe{} on \Pmax{} processes and converges to that ratio as the node becomes bandwidth-bound: on a single
-node the reduction latency it hides is worth microseconds, so only the extra traffic remains. CG1 is 10\%
-faster than the baseline on four processes and equal from 16 processes on (\RelCGone{} at $P=\Pmax$). It
-moves the same bytes, and its advantage comes from the single fused update sweep, which counts while the
-cores rather than the memory set the pace.
+The decomposition matters most, and the volume model of \cref{eq:volume} predicts it. Slabs are
+\RelOneDmin{} times slower than blocks on one node and \RelOneD{} times slower on \NodesMax{} nodes: every
+slab process ships two full $512^2$ planes, 4\,MiB per iteration whatever $P$, and at $P=256$ each slab is
+only two planes thick, so a process sends as much data as it owns. Pencils stay within a few percent of
+blocks (\RelTwoDRange): their halo volume falls like $P^{-1/2}$, which at these process counts is close
+enough to the $P^{-2/3}$ of blocks, and they avoid the strided $k$-faces.
 
-The decompositions follow the volume model of \cref{fig:commvol}. Up to eight processes slabs are within 2\% of blocks. From 16 processes on, slabs fall behind and run 13--14\% slower
-at $P=32$ and $P=\Pmax$, where every process ships two full $512^2$ planes, 4\,MiB per iteration against
-1.1\,MiB for blocks. Pencils are never slower than blocks and up to 5\% faster: they avoid the strided
-$k$-faces, whose gather and shell pass cost more on one node than the extra halo volume saves.
+Overlapping the halo exchange does not pay, even across the network. The blocking exchange runs at
+\RelBlockingRange{} times the baseline and is 8\% faster on \NodesMax{} nodes (\RelBlocking). The reason is
+the one found in \cref{sec:comm}: the messages are small and the network fast, so there is little transfer
+time to hide, while the overlapped mode pays for the chunked interior sweep, the polling and the second pass
+over the boundary shell. Overlap would pay with larger faces per process or a slower network.
 
-Overlapping the halo exchange does not pay on one node. The blocking exchange is 2--7\% faster at every $P$
-(\RelBlocking{} at $P=\Pmax$). Messages between processes on the same node are memory copies that complete
-in microseconds, so there is nothing to hide, while the overlapped mode pays for the second pass over the
-boundary shell and for the polling. Overlap is built for a network, where each message costs tens of
-microseconds.
+The CG formulations confirm that the reductions are the cost that grows. CG1 merges the two reductions
+into one. On one node, where they cost little, it runs at \RelCGonemin{} times the baseline; on \NodesMax{}
+nodes it is 5\% faster (\RelCGone), because each iteration now passes one barrier instead of two. Pipelined
+CG pays its 36\% traffic surcharge almost in full on one node (\RelPipemin, model 1.36), and its relative
+cost falls to \RelPipe{} on \NodesMax{} nodes, where more reduction time is there to hide. It does not
+break even. The model of \cref{sec:model} would let it win once the hidden reduction time exceeds 36\% of
+the memory time, and at $P=\Pmax$ the two are comparable, but the \code{MPI\_Iallreduce} hides the latency
+of the reduction, not the waiting for the slowest process, which still arrives after the overlapped
+stencil. On the larger $\NStwo^3$ grid, with less communication per byte of memory traffic, pipelined CG
+remains \RelPipeTwo{} times slower on \NodesMax{} nodes.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{variants}
 \caption{Time per iteration of each variant divided by the baseline (3D blocks, overlapped halo, classic CG)
-at the same $P$; values below 1 are faster.}\label{fig:variants}
+at the same $P$, $N=\NS^3$, 32 processes per node; values below 1 are faster.}\label{fig:variants}
 \end{figure}
 
 \begin{table}[t]
 \centering\small
-\caption{Time per iteration in ms and, in parentheses, relative to the baseline; $N=\NS^3$ (four of the
-process counts; \cref{fig:variants} shows all of them).}\label{tab:variants}
+\caption{Time per iteration in ms and, in parentheses, relative to the baseline; $N=\NS^3$, one, two, four
+and eight nodes (\cref{fig:variants} shows all process counts).}\label{tab:variants}
 \tabinput{generated/tab_variants_head.tex}
 \tabinput{generated/tab_variants.tex}
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{Processes versus threads}\label{sec:hybrid}
+\subsection{Processes versus threads on \HybCores{} cores}\label{sec:hybrid}
 
 \Cref{fig:hybrid} and \cref{tab:hybrid} keep all \HybCores{} cores busy and vary the split into MPI
-processes and OpenMP threads. \HybSentence{} Two or four threads per process are best (52.8 and 52.7\,ms):
-fewer processes mean fewer and larger halo messages and fewer participants in each reduction. From six
-threads per process on, the reduction wait disappears (below 1\,ms per iteration), but the iteration does
-not get faster. The imbalance has moved inside the processes, where threads that share a slow memory
-controller now hold up the OpenMP barrier at the end of each sweep instead of the \code{MPI\_Allreduce}. With
-more threads the fork--join cost grows, and a single process with 36 threads is 16\% slower than the best
-split. The right configuration is a few processes per socket with a handful of threads each.
+processes and OpenMP threads, from 256 single-threaded processes to eight processes with 32 threads, one
+per node. All splits lie within \HybRange\% of each other, so the hybrid code loses nothing to its threads.
+The best split is \HybBest{} (\HybBestT\,ms), \HybGain\% faster than pure MPI (\HybPureT\,ms): four
+processes per socket mean eight times fewer participants in each reduction and fewer, larger halo
+messages, and the reduction wait drops from \HybRedPure{} to \HybRedBest\,ms per iteration. With more
+threads per process the fork--join cost of the many parallel regions per iteration grows, and one process
+per node with 32 threads (\HybWorstT\,ms) is the slowest split. The median runs (diamonds) show that the
+splits with 64 and 128 processes also suffered most from slow repetitions on the shared nodes. The right
+configuration is a few processes per socket with eight threads each.
 
 \begin{figure}[t]
 \centering
 \begin{minipage}[t]{0.46\linewidth}\centering\vspace{0pt}
 \includegraphics[width=\linewidth]{hybrid}
-\caption{Time per iteration for different process $\times$ thread splits of the same 36 cores.}\label{fig:hybrid}
+\caption{Time per iteration for different process $\times$ thread splits of the same 256 cores, $512^3$.}\label{fig:hybrid}
 \end{minipage}\hfill
 \begin{minipage}[t]{0.5\linewidth}\centering\small\vspace{0pt}
-\captionof{table}{Process $\times$ thread splits: time per iteration and its communication parts (ms,
-including waiting), and the total halo volume per iteration (MiB).}\label{tab:hybrid}
+\captionof{table}{Process $\times$ thread splits on 256 cores: best and median time per iteration and the
+halo and reduction parts of the best run (ms, including waiting).}\label{tab:hybrid}
 \begin{tabular}{rrrrrr}
 \toprule
-$P$ & $T$ & total & halo & reduce & MiB \\
+$P$ & $T$ & best & median & halo & reduce \\
 \midrule
 \tabinput{generated/tab_hybrid.tex}
 \bottomrule
@@ -549,32 +664,62 @@ $P$ & $T$ & total & halo & reduce & MiB \\
 \end{minipage}
 \end{figure}
 
-\subsection{Weak scaling and time to solution}\label{sec:weak}
+\subsection{GPU offload}\label{sec:gpu}
 
-For weak scaling each process keeps about $\WeakLocal^3$ grid points, i.e.\ $N=\mathrm{round}(\WeakLocal\,
-P^{1/3})$. \Cref{fig:weak} reports the time per grid point and iteration relative to one process. At
-$P=\WeakPmax$ the efficiency is \WeakEffPmax\%: one process completes its iteration in 21.1\,ms, 36 processes
-need 102.9\,ms for 36 times the data. The cause is the same wall: the bandwidth available to each process
-drops from 32\,GB/s to 6.6\,GB/s. On one node, weak and strong scaling measure the same thing, how the
-memory bandwidth is shared. Across nodes, where every node brings its own memory, weak scaling isolates
-the halo and reduction terms of \eqref{eq:model}. Weak scaling of the time per iteration also flatters the
-algorithm: the iteration count grows like $N\propto P^{1/3}$, so the time to solution grows by the same
-factor even when every iteration scales perfectly, a growth that only a better preconditioner removes.
+\Cref{fig:gpu} and \cref{tab:gpu} run the offload solver on one A40 from $N=\GpuNmin$ to $N=\GpuNmax$,
+the largest grid holding \GpuDofsMax{} million unknowns. Above $128^3$ the GPU sustains a constant
+\GpuBwMin--\GpuBwMax\,GB/s of DRAM traffic, \GpuBwFrac\% of its nominal 696\,GB/s; at $128^3$ the grid is
+too small to fill the device and the launch overhead of the three kernels per iteration shows. The stencil
+takes \GpuSpmvFrac\% of an iteration and the two vector-update kernels the rest; both run at memory speed,
+\GpuSpmvBw{} and \GpuVecBw\,GB/s. CG1 is \GpuCGoneRel\% slower than classic CG on the GPU: its fused five-vector
+kernel saves no traffic, and there are no reductions to merge on a single device.
 
-\Cref{tab:solve} closes the loop with complete solves to $\varepsilon=10^{-8}$ on all 36 cores. All three
-variants stop after \SolveIters{} iterations and reach the same error against the exact solution, which at
-this tolerance is set by the discretisation; CG and CG1 finish in about 106\,s, pipelined CG takes 140\,s.
-The true residuals differ: CG and CG1 end at \SolveCGTrue, pipelined CG at \SolvePipeTrue, \SolvePipeRatio{}
-times the tolerance its recursive residual reports. On the $256^3$ development grid the same ratio was 4;
-the residual gap grows with the problem and is the second cost of hiding the reduction, next to the extra
-memory traffic.
+On the $512^3$ grid one A40 needs \GpuTfiveTwelve\,ms per iteration and moves \GpuBwFiveTwelve\,GB/s. That
+is \GpuVsSocket{} times faster than a 32-core CPU socket, \GpuVsCore{} times faster than one core and
+\GpuVsEight{} times slower than the \NodesMax{} nodes of \cref{sec:strong}; the ratio to the socket is
+the ratio of the memory bandwidths, as the model predicts. With several GPUs every halo message passes
+through host memory twice, so the communication terms of \eqref{eq:model} weigh more than on the CPU; the
+validation runs of \cref{sec:validation} exercise this path on up to eight processes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{gpu}
+\caption{(a) DRAM bandwidth of the offload solver on one NVIDIA A40 (88 bytes per point and iteration).
+(b) Time per iteration on the $512^3$ grid: serial code, one 32-core socket, one A40 and eight nodes.}\label{fig:gpu}
+\end{figure}
 
 \begin{table}[t]
 \centering\small
-\caption{Complete solves to $\varepsilon=10^{-8}$, $N=\NS^3$, 36 cores, blocks, overlapped halo.}\label{tab:solve}
-\begin{tabular}{lrrrrcc}
+\caption{One A40: unknowns (millions), memory of the four CG vectors (GiB), time per iteration of classic CG
+and CG1 (best of 3 runs of 50 iterations), DRAM bandwidth, share of the stencil kernel, and billions of
+grid-point updates per second.}\label{tab:gpu}
+\begin{tabular}{rrrrrrrr}
 \toprule
-algorithm & $P$ & iterations & time (s) & ms / iteration & true residual & max error \\
+$N$ & unknowns & GiB & CG ms/iter & CG1 ms/iter & GB/s & stencil (\%) & GLUP/s \\
+\midrule
+\tabinput{generated/tab_gpu.tex}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Time to solution}\label{sec:solve}
+
+\Cref{tab:solve} closes the loop with complete solves of the $512^3$ problem to $\varepsilon=10^{-8}$. All
+runs stop after \SolveIters{} iterations and reach the same error against the exact solution, which at this
+tolerance is set by the discretisation. The serial code needs \SzSolveMax\,s. \Pmax{} cores on \NodesMax{}
+nodes solve the problem in \SolveCG\,s with classic CG and \SolveCGone\,s with CG1, \SolveSpeedup{} times
+faster than the serial code; one A40 needs \SolveGpu\,s. Pipelined CG takes \SolvePipe\,s and is the only
+variant whose answer is worse: its true residual ends at \SolvePipeTrue, \SolvePipeRatio{} times the
+tolerance its recursive residual reports. The residual gap of \cref{sec:validation} grows with the problem
+and is the second cost of hiding the reduction, next to the extra memory traffic.
+
+\begin{table}[t]
+\centering\small
+\caption{Complete solves to $\varepsilon=10^{-8}$, $N=\NS^3$ (CPU runs: blocks, overlapped halo, 32
+processes per node). ``speedup'' is relative to the serial solve.}\label{tab:solve}
+\begin{tabular}{llrrrccr}
+\toprule
+platform & algorithm & iterations & time (s) & ms/iter & true residual & max error & speedup \\
 \midrule
 \tabinput{generated/tab_solve.tex}
 \bottomrule
@@ -583,32 +728,46 @@ algorithm & $P$ & iterations & time (s) & ms / iteration & true residual & max e
 
 \section{Conclusions}\label{sec:conclusion}
 
-We built a matrix-free hybrid MPI\,+\,OpenMP Conjugate Gradient solver for the 3D Poisson equation in
-which decomposition, halo exchange, reduction strategy and threading are run-time switches. It reproduces
-the serial solution to rounding level in \ValRuns{} configurations and \ValEdge{} edge cases, and again in the quick suite run on Vanda, and converges to the exact solution at the theoretical second
-order, so every performance difference we measure is a property of the parallel design.
+We built a matrix-free Conjugate Gradient solver for the 3D Poisson equation in a serial, a hybrid
+MPI\,+\,OpenMP and an MPI\,+\,OpenMP offload version, in which decomposition, halo exchange, reduction
+strategy and threading are run-time switches. All versions reproduce the serial solution to rounding level
+and converge to the exact solution at the theoretical second order, so every performance difference we
+measure is a property of the parallel design.
 
-On a Vanda node CG runs into the memory-bandwidth wall. The solver scales almost perfectly to four
-processes, reaches a speedup of \SpeedupPmax{} on \Pmax{} cores and moves \CGbwAll\,GB/s at that point, 70\%
-of the node's STREAM bandwidth; strong and weak scaling inside the node both reduce to how that bandwidth is
-shared. The memory-traffic model predicts the design trade-offs to within a few percent: pipelined CG pays
-its 36\% traffic surcharge almost in full (\RelPipe{} measured), CG1 is up to 10\% faster than classic CG
-and never more than 1\% slower, slabs lose 13--14\% once their constant halo volume stops shrinking, and overlapping
-the halo pays only where messages cross a network. The global reductions do more damage as barriers than
-as messages: on 36 cores they turn the bandwidth imbalance between two sockets into 30\,ms of waiting per
-iteration, and two or four OpenMP threads per process recover 3\% of the iteration.
+The problem is parallelised by distributing the grid in 3D blocks with one ghost layer, so that each
+process applies the stencil to its own block after a six-message halo exchange, and by turning each inner
+product into a local OpenMP or GPU reduction followed by a global \code{MPI\_Allreduce}. Its performance is
+set by memory bandwidth first and by the reductions second. Inside a socket the solver scales exactly as
+far as the memory controllers do, \CGbwFrac\% of STREAM on 32 cores and a speedup of \SpeedupNode. Across
+nodes each socket adds bandwidth, and \Pmax{} cores on \NodesMax{} nodes reach a speedup of \SpeedupPmax{}
+over the serial code, \NodeEffPmax\% strong-scaling efficiency relative to one node on $512^3$,
+\NodeEffTwoPmax\% on $768^3$ and \WeakNodeEff\% weak-scaling efficiency on 1.8 billion unknowns.
 
-For the reduction term the three CG formulations offer a clear trade-off. Merging the two reductions
-(Chronopoulos--Gear) costs nothing and is the formulation we recommend by default. Hiding the reduction
-completely (pipelined CG) costs 36\% more memory traffic and leaves the true residual \SolvePipeRatio{} times
-above the requested tolerance on the $\NS^3$ grid, so it needs residual replacement and wins only across many
-nodes, where reduction latency exceeds the extra memory time. The natural next steps are a multigrid or
-Chebyshev preconditioner, which removes the $O(N)$ growth of the iteration count, and multi-node runs, where
-the communication design of \cref{sec:design} comes into play.
+The part of the algorithm that communicates most in time is not the part that communicates most in bytes.
+The halo exchange moves all of the data---\HaloKiBPmax\,KiB per process and iteration at $P=\Pmax$---and
+costs \HaloFracPmax\% of the iteration; the two reductions move 16 bytes and cost \RedFracPmax\%, because
+every reduction is a barrier at which \Pmax{} processes wait for the slowest one. The design choices follow
+from this. Blocks or pencils are mandatory, since slabs send as much as they compute and run \RelOneD{}
+times slower on \NodesMax{} nodes. Overlapping the halo exchange hides little and costs more. Merging the
+two reductions (CG1) costs nothing and saves 5\% at scale, so it is the formulation we recommend. Pipelining
+the reduction hides its latency but not the waiting, adds 36\% memory traffic and degrades the true residual
+\SolvePipeRatio-fold, so it does not pay on this machine. A few MPI processes per socket with eight OpenMP
+threads each cut the reduction wait and give the fastest split on \HybCores{} cores. One A40 GPU delivers
+the bandwidth of \GpuVsSocket{} CPU sockets and solves the $512^3$ problem in \SolveGpu\,s.
+
+The next steps follow from the same analysis: a multigrid or Chebyshev preconditioner, which removes the
+$O(N)$ growth of the iteration count, and communication-avoiding $s$-step methods, which perform one
+reduction per $s$ iterations and attack the barrier cost directly.
 
 \paragraph{Code and data.} The source code, the PBS job scripts, the scripts that produce every figure and
-table, the raw CSV measurements and a \code{README.md} with full run instructions are open source (MIT
-licence) at \url{https://github.com/davidzuo023/dsa5208-cg-poisson} [7].
+table, the raw CSV measurements and job logs, and a \code{README.md} with full run instructions are open
+source (MIT licence) at \url{https://github.com/davidzuo023/dsa5208-project3} [7].
+
+\paragraph{Use of AI tools.} We used Claude (Anthropic) as a coding and writing assistant. Under our
+direction it wrote most of the implementation, the test and benchmark scripts and a first draft of this
+report. We chose the problem and the parallelisation questions, obtained access to Vanda and ran all jobs
+there, checked the results against the validation suite, and reviewed and edited the report. All numbers
+in this report come from our runs; the commit history of the repository reflects this workflow.
 
 \section*{References}
 \begin{enumerate}\footnotesize\setlength{\itemsep}{0pt}\setlength{\parsep}{0pt}
@@ -625,8 +784,8 @@ for ranking high-performance computing systems. \emph{Int.\ J.\ High Perform.\ C
 \emph{IEEE TCCA Newsletter}, 1995.
 \item J.~R.~Shewchuk. \emph{An Introduction to the Conjugate Gradient Method Without the Agonizing Pain}.
 Carnegie Mellon University, 1994.
-\item Y.~Wu, D.~Zuo and C.~Zhu. \emph{dsa5208-cg-poisson: hybrid MPI+OpenMP Conjugate Gradients for the
-3D Poisson equation}. Source code, 2026. \url{https://github.com/davidzuo023/dsa5208-cg-poisson}.
+\item Y.~Wu, D.~Zuo and C.~Zhu. \emph{dsa5208-project3: Conjugate Gradients for the 3D Poisson equation with
+MPI, OpenMP and GPU offload}. Source code, 2026. \url{https://github.com/davidzuo023/dsa5208-project3}.
 \end{enumerate}
 
 \end{document}

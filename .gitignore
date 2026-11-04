@@ -4,3 +4,4 @@ report/*.aux
 report/*.log
 report/*.out
 __pycache__/
+results/validation_quick/

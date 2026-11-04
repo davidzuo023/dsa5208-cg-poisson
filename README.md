@@ -1,12 +1,12 @@
-# Hybrid MPI + OpenMP Conjugate Gradients for the 3D Poisson equation
+# Conjugate Gradients for the 3D Poisson equation with MPI, OpenMP and GPU offload
 
 DSA5208 project. A matrix-free Conjugate Gradient (CG) solver for
 
     -Δu = f  on (0,1)^3,  u = 0 on the boundary,
 
 discretised with the 7-point finite-difference stencil on an N³ grid. The project has a serial
-reference code and one hybrid MPI+OpenMP code in which every parallelisation decision can be switched
-at run time, so you can measure what each choice does to scaling:
+reference code, a hybrid MPI+OpenMP code in which every parallelisation decision can be switched
+at run time, and an MPI + OpenMP target-offload code for GPUs (one GPU per MPI rank):
 
 | switch | choices | what it changes |
 |---|---|---|
@@ -16,6 +16,11 @@ at run time, so you can measure what each choice does to scaling:
 | `OMP_NUM_THREADS` | T | OpenMP threads per MPI rank |
 
 The report is `report/report.pdf`. Authors: Wu Yuhan, Zuo Dewei, Zhu Chen. Licence: MIT (`LICENSE`).
+
+Headline results (NUS Vanda, Xeon Platinum 8452Y, 32 cores per node; NVIDIA A40):
+512³ CG iteration in 9.92 ms on 256 cores / 8 nodes (speedup 55 over the serial code,
+76 % strong-scaling efficiency relative to one node, 83 % for 768³), 80 % node-level weak-scaling
+efficiency on 1.8 × 10⁹ unknowns, one A40 = 2.4 CPU sockets (25.0 ms per 512³ iteration).
 
 ## Quick start: from source to report
 
@@ -39,15 +44,14 @@ bash scripts/validate.sh full             # -> results/validation/summary.txt  (
 # 4. halo-volume measurement for 1D/2D/3D decompositions (machine independent)
 bash scripts/comm_volume.sh               # -> results/commvol.csv
 
-# 5. benchmarks on this machine
-MACHINE=local NS=256 NW=224 REPS=5 bash scripts/run_suite.sh    # -> results/local/
+# 5. benchmarks on this machine (any subset of experiments, see scripts/run_suite.sh)
+MACHINE=local NS=256 NW=128 REPS=3 bash scripts/run_suite.sh    # -> results/local/
 
-# 6. figures, tables and the PDF report from those results
-make report RESULTS=results/local         # -> figures/*.pdf, report/report.pdf
+# 6. on Vanda (see the section below): the four jobs behind the report
+qsub -P <project> pbs/vanda256.pbs  ...    # -> results/vanda256/ etc.
 
-# 7. on Vanda / Atlas (see the section below): benchmark job, then rebuild the report
-qsub pbs/vanda_suite.pbs                  # -> results/vanda/
-make report RESULTS=results/vanda
+# 7. figures, tables and the PDF report from results/vanda*/
+make report                               # -> figures/*.pdf, report/report.pdf
 ```
 
 ## Layout
@@ -65,13 +69,14 @@ scripts/comm_volume.sh halo volume per iteration for 1D/2D/3D decompositions
 scripts/make_plots.py  figures + LaTeX tables + number macros for the report
 scripts/run_gpu.sh     GPU benchmarks (validation vs serial, size sweep, multi-GPU, time to solution)
 scripts/gpu_job.sh     builds with the NVIDIA HPC SDK on a Vanda GPU node and runs run_gpu.sh
-pbs/vanda256.pbs       PBS job: 8 nodes x 32 cores, strong/weak scaling to 256 MPI processes
+pbs/vanda256.pbs       PBS job: 8 nodes x 32 cores, strong/weak scaling, variants, hybrid, solves (256 processes)
+pbs/vanda_node.pbs     PBS job: one 32-core chunk: STREAM, serial baseline, quick validation
 pbs/vanda_sizes.pbs    PBS job: serial problem-size study (N = 64 ... 512) on one core
 pbs/vanda_gpu.pbs      PBS job: one A40 GPU (calls scripts/gpu_job.sh)
-pbs/vanda_suite.pbs    PBS job: build, quick validation, full benchmark suite on Vanda
+pbs/vanda_suite.pbs    generic PBS job: build, quick validation, full suite (any node count)
 pbs/atlas_suite.pbs    same for Atlas (queue parallel24)
 pbs/validate.pbs       full validation as a PBS job
-results/               CSV results (local/, validation/, commvol.csv)
+results/               measurements behind the report (see "Results included")
 figures/, report/      generated figures, report source and PDF
 ```
 
@@ -154,43 +159,39 @@ true residual ≤ 1.5·tol, and the discretisation error decreases as O(h²) (ob
 in serial and in parallel. Ranks may exceed the number of cores here (Open MPI `--oversubscribe`
 is added automatically).
 
-## Benchmarks on Atlas / Vanda (NUS HPC, PBS Pro)
+## Benchmarks on Vanda (NUS HPC, PBS Pro)
 
-1. Copy the project to the cluster (e.g. `scp -r dsa5208-cg-poisson <nusnet>@vanda.nus.edu.sg:~`).
-2. Check the queue and module names: `hpc pbs help`, `qstat -Q`, `module avail 2>&1 | grep -i mpi`,
-   and edit the `#PBS -q`, `#PBS -P` and `module load` lines of `pbs/vanda_suite.pbs` (or
-   `pbs/atlas_suite.pbs`). The `select=` line sets the number of nodes; the scripts adapt to it.
-3. `qsub pbs/vanda_suite.pbs` (from the project root). The job requests whole nodes
-   (`place=scatter:excl`; delete that line if the queue rejects it), rebuilds into `bin_vanda/`
-   against the loaded MPI, runs the quick validation and then the full suite: STREAM, serial
-   baseline, strong scaling on P = 1, 2, 4, …, 32, 36 (one socket), 64, 72 (one node), 144,
-   decomposition/halo/algorithm variants (P ≥ 4), hybrid splits, weak scaling and time to
-   solution. Default sizes: N = 512 (134 M unknowns); 192³ points per rank for weak
-   scaling (larger than the L3 cache, so the one-process baseline is not cache-inflated);
-   50 iterations per timing run; 3 repetitions. Expect 1–3 h on 2 nodes.
-4. Regenerate the report from the cluster data:
+1. Clone the repository on Vanda (`git clone https://github.com/davidzuo023/dsa5208-project3.git`).
+   The PBS scripts build the code on the compute node, so nothing needs to be compiled on the
+   login node.
+2. The free queue (`auto_free`) stops at 160 cores per user; 256 cores need a project
+   (`hpc project`, e.g. `personal-<nusnet>`). Jobs with a project are submitted without a queue
+   name; the scripts that set `#PBS -q auto_free` are submitted with that line removed:
+
    ```bash
-   make report RESULTS=results/vanda      # needs pandas, matplotlib, pdflatex
+   sed '/#PBS -q/d' pbs/vanda256.pbs   | qsub -P <project>   # 8 x 32 cores, ~1 h   -> results/vanda256/
+   qsub -P <project> pbs/vanda_node.pbs                       # 32 cores, ~15 min    -> results/vanda_node/
+   sed '/#PBS -q/d' pbs/vanda_sizes.pbs | qsub -P <project>   # 1 core, ~40 min      -> results/vanda_sizes/
+   sed '/#PBS -q/d' pbs/vanda_gpu.pbs   | qsub -P <project>   # 1 A40, ~15 min       -> results/vanda_gpu/
+   sed '/#PBS -q/d' pbs/vanda_gpu.pbs   | qsub -P <project> -v ONLY=validate,MACHINE=vanda_gpu_val
    ```
-   Figures, tables and every number in the text are rebuilt from the CSVs, and the Setup
-   paragraph of Section 5 switches from the development machine to the cluster description
-   automatically. Then re-read Section 5 and adjust the interpretation where the cluster data
-   tells a different story (the paragraphs specific to the 2-core machine are dropped).
+3. `make report` rebuilds every figure, table and number in the text from these directories.
 
-### The three follow-up jobs (256 cores, problem size, GPU)
+Notes from running on Vanda:
 
-```bash
-qsub pbs/vanda_sizes.pbs   # 1 core,  ~30 min  -> results/vanda_sizes/bench.csv   (exp = sizes_iter, sizes_solve)
-qsub pbs/vanda256.pbs      # 8 x 32 cores      -> results/vanda256/bench.csv      (strong, strong2, weak, variants, hybrid, solve)
-qsub pbs/vanda_gpu.pbs     # 1 A40 GPU, ~20 min -> results/vanda_gpu/gpu.csv, validation.txt
-```
-
-The GPU build uses `nvhpc-hpcx-cuda12/26.1` (`mpicc` wraps `nvc`, flags `-mp=gpu -gpu=cc86`);
-`OMP_TARGET_OFFLOAD=MANDATORY` makes a run fail instead of silently falling back to the host.
-The same script works in an interactive GPU session:
-`qsub -I -q auto_free -l select=1:ncpus=36:ngpus=1 -l walltime=01:00:00`, then
-`cd <project> && bash scripts/gpu_job.sh`. Without a GPU compiler the code still builds and
-runs on the host: `make gpu GPUFLAGS="-O2 -fopenmp -foffload=disable"`.
+* CPU jobs load `gcc/13.1.0 openmpi/gcc/64/4.1.8` and set
+  `OMPI_MCA_btl_vader_single_copy_mechanism=none` (the nodes forbid the CMA single-copy path).
+* Multi-node runs start the remote ranks through PBS (`pbs_tmrsh`, picked automatically by
+  `scripts/run_suite.sh`), which keeps them inside the job's CPU set. Before the experiments the
+  suite tests a launch on all cores and falls back to one node if it fails; `env.txt` records the
+  remote-start method and the cores and CPU model of every node.
+* The GPU job tries `nvhpc-hpcx-cuda12/26.1`, `nvhpc-hpcx-2.20-cuda12/26.1`, `nvhpc/24.5` and
+  `nvhpc/26.1` in turn and keeps the first one whose build runs on the GPU (`mpicc` wraps `nvc`,
+  flags `-mp=gpu -gpu=cc86`); `OMP_TARGET_OFFLOAD=MANDATORY` makes a run fail instead of silently
+  falling back to the host. The same script works in an interactive GPU session
+  (`qsub -I -l select=1:ncpus=36:ngpus=1 -l walltime=01:00:00`, then `bash scripts/gpu_job.sh`).
+  Without a GPU compiler the code builds and runs on the host:
+  `make gpu GPUFLAGS="-O2 -fopenmp -foffload=disable"`.
 
 Knobs of `scripts/run_suite.sh` (environment variables): `MACHINE`, `NS`, `NW`, `ITERS`, `REPS`,
 `PLIST`, `VARIANT_PMIN`, `EXPERIMENTS`, `MPI_FLAVOR`, `MPIRUN`, `BIN`, `APPEND` (see the header of
@@ -205,9 +206,24 @@ variants are compared iteration against iteration.
 
 ## Results included
 
-* `results/vanda/` — the measurements in the report: 36 cores of one NUS Vanda compute node
-  (2 × Intel Xeon Gold 6438N, 32 cores per socket), Open MPI 4.1.8, GCC 13.1.0, produced by
-  `pbs/vanda36.pbs` (free queue `auto_free`; on Vanda load `gcc/13.1.0 openmpi/gcc/64/4.1.8` and set
-  `OMPI_MCA_btl_vader_single_copy_mechanism=none`). `make report` rebuilds the PDF from them.
-* `results/local/` — the same suite on the 2-core development machine (`make report RESULTS=results/local`).
+All measurements in the report, with the job logs in `results/vanda_logs/`:
+
+* `results/vanda256/` — 8 nodes × 32 cores (one socket of 2 × Intel Xeon Platinum 8452Y per node),
+  Open MPI 4.1.8, GCC 13.1.0: strong scaling (512³ from 1 to 256 processes, 768³ from 32), weak
+  scaling (192³ per process), decomposition / halo / algorithm variants, process × thread splits
+  and complete solves. `bench.csv` has every repetition; `make report` writes the best-of-3 table
+  `bench_best.csv`.
+* `results/vanda_node/` — STREAM triad, serial baseline and the quick validation suite on one
+  32-core chunk of the same CPU type.
+* `results/vanda_sizes/` — serial problem-size study, N = 64 … 512.
+* `results/vanda_gpu/`, `results/vanda_gpu_val/` — one NVIDIA A40: size sweep, complete solves,
+  and validation against the serial solution with 1, 2, 4 and 8 ranks sharing the GPU.
 * `results/validation/` — the full correctness suite; `results/commvol.csv` — halo volumes.
+
+## Use of AI tools
+
+We used Claude (Anthropic) as a coding and writing assistant. Under our direction it wrote most of
+the implementation, the test and benchmark scripts and a first draft of the report. We chose the
+problem and the parallelisation questions, obtained access to Vanda and ran all jobs there, checked
+the results against the validation suite, and reviewed and edited the report. All numbers in the
+report come from our runs.

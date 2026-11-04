@@ -5,7 +5,7 @@
 #
 #   make            build bin/cg_serial, bin/cg_mpi, bin/stream_omp
 #   make test       quick correctness check (needs mpirun)
-#   make report     rebuild figures/tables from results/*.csv and compile report/report.pdf
+#   make report     rebuild figures/tables from results/vanda*/ and compile report/report.pdf
 #
 # Override the compiler wrappers / flags if needed, e.g. on a cluster whose login node
 # has a different CPU than the compute nodes:
@@ -48,9 +48,8 @@ $(BIN)/cg_gpu: $(SRC)/cg_gpu.c $(SRC)/common.h | $(BIN)
 test: all
 	bash scripts/validate.sh quick
 
-RESULTS ?= results/vanda
 report:
-	python3 scripts/make_plots.py --results $(RESULTS)
+	python3 scripts/make_plots.py
 	cd report && pdflatex -interaction=nonstopmode -halt-on-error report.tex >/dev/null && \
 	             pdflatex -interaction=nonstopmode -halt-on-error report.tex >/dev/null
 	@echo "report/report.pdf rebuilt"
