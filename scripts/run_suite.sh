@@ -116,26 +116,35 @@ has() { [[ " $EXPERIMENTS " == *" $1 "* ]]; }
     $MPIRUN --version 2>&1 | head -2 || true
     ${MPICC:-mpicc} --version 2>&1 | head -1 || true   # the compiler that built all binaries
     command -v ompi_info >/dev/null && ompi_info 2>/dev/null | grep -E "MCA (pml|btl|mtl):" | sed 's/^ */  /' || true
-    if (( NODES > 1 )) && [[ $MPI_FLAVOR == openmpi ]]; then
-        echo "placement (one line per node: host, cores allowed to this job, CPU):"
-        $MPIRUN -np "$NODES" $HOSTOPT $PREFIX --map-by ppr:1:node --bind-to none \
-            sh -c 'echo "  $(hostname)  cpus=$(grep Cpus_allowed_list /proc/self/status | cut -f2)  $(lscpu | grep "Model name" | sed "s/.*: *//")"' \
-            2>&1 | sort || true
-    fi
 } > "$OUT/env.txt"
 cat "$OUT/env.txt"
 
-# multi-node jobs: one quick run on all cores first. If ranks cannot be started on the
-# other nodes, measure on the first node only instead of failing for the whole walltime.
+# multi-node jobs: one quick run on all cores first. Remote daemons are started through PBS
+# (pbs_tmrsh: ranks stay inside the job's cpuset) if possible, else with ssh. If neither works,
+# measure on the first node only instead of failing for the whole walltime.
+multi_ok() { local o; o=$(launch "$CORES" 1 -n 64 -t 0 -m 2 -q 2>&1 || true); grep -q '^CSV,' <<< "$o"; }
 if (( NODES > 1 )) && [[ $MPI_FLAVOR == openmpi ]]; then
-    if ! launch "$CORES" 1 -n 64 -t 0 -m 2 -q 2>&1 | grep -q '^CSV,'; then
+    agent=none
+    TMRSH=$(command -v pbs_tmrsh || ls /opt/pbs/bin/pbs_tmrsh 2>/dev/null || true)
+    if [[ -n $TMRSH ]]; then
+        export OMPI_MCA_plm_rsh_agent=$TMRSH
+        multi_ok && agent=$TMRSH || unset OMPI_MCA_plm_rsh_agent
+    fi
+    if [[ $agent == none ]] && multi_ok; then agent=ssh; fi
+    if [[ $agent == none ]]; then
         echo "WARNING: multi-node launch failed; restricting to one node (P <= $CPN)" | tee -a "$OUT/env.txt"
         PLIST=$(for p in $PLIST; do if (( p <= CPN )); then echo $p; fi; done | tr '\n' ' ')
         NODES=1; CORES=$CPN
         first=$(head -1 "$PBS_NODEFILE"); grep -x -F "$first" "$PBS_NODEFILE" > "$OUT/hostfile.node1"
         HOSTOPT="--hostfile $OUT/hostfile.node1"
     else
-        echo "multi-node launch test on $CORES ranks: OK" | tee -a "$OUT/env.txt"
+        {
+            echo "multi-node launch test on $CORES ranks: OK (remote start: $agent)"
+            echo "placement (one line per node: host, cores allowed to this job, CPU):"
+            $MPIRUN -np "$NODES" $HOSTOPT $PREFIX --map-by ppr:1:node --bind-to none \
+                sh -c 'echo "  $(hostname)  cpus=$(grep Cpus_allowed_list /proc/self/status | cut -f2)  $(lscpu | grep "Model name" | sed "s/.*: *//")"' \
+                2>&1 | sort || true
+        } | tee -a "$OUT/env.txt"
     fi
 fi
 
