@@ -149,7 +149,9 @@ which vanishes on $\partial\Omega$, and compute the matching source $f=-\nabla^2
 $g''(t)=-t(3+t)e^t$. The common choice $\sin(\pi x)\sin(\pi y)\sin(\pi z)$ would be useless here: it is
 an eigenvector of the discrete operator, CG converges on it in a single iteration, and the test would
 hide most bugs. For our $u$ the discrete solution differs from the exact one by a genuine $O(h^2)$ error,
-which turns the comparison with $u$ into a sharp end-to-end test.
+which turns the comparison with $u$ into a sharp end-to-end test. The project uses no external data set:
+the input is generated from this manufactured solution, so our conclusions concern the solver and the
+machine rather than a data set.
 
 CG~[1,6] (\cref{alg:cg}) builds the iterates $\vb x_k$ from the residuals $\vb r_k=\vb b-A\vb x_k$ and the
 search directions $\vb p_k$; the step length $\alpha_k$ minimises the $A$-norm of the error along
