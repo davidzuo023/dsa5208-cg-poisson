@@ -160,8 +160,13 @@ def fig_sizes(d, macros, tables):
     s = pd.read_csv(p)
     it = s[s.exp == "sizes_iter"].groupby("N0").agg(t=("t_iter", "min"), t_med=("t_iter", "median")).reset_index()
     so = s[s.exp == "sizes_solve"].groupby("N0").agg(iters=("iters", "max"), ts=("t_solve", "min"),
-                                                     err=("err_max", "min"), tr=("true_relres", "min")).reset_index()
+                                                     err=("err_max", "min"), tr=("true_relres", "min"),
+                                                     t_long=("t_iter", "min")).reset_index()
     z = it.merge(so, on="N0", how="left")
+    # a 20-iteration run of a small grid lasts milliseconds and catches clock ramp-up and neighbours
+    # on the shared node; the complete solve runs the same loop for hundreds of iterations.
+    # Time per iteration = the faster of the two.
+    z["t"] = z[["t", "t_long"]].min(axis=1)
     z["n"] = z.N0.astype(float) ** 3
     z["nnz"] = 7 * z.N0.astype(float) ** 3 - 6 * z.N0.astype(float) ** 2
     z["nspt"] = 1e9 * z.t / z.n
@@ -195,13 +200,12 @@ def fig_sizes(d, macros, tables):
     plain_log(ax[2], "y", -2, 5)
     ax[2].legend(loc="upper left")
     fig.tight_layout()
-    suptitle(fig, "Serial solver: cost against problem size", "one core; matrix dimension $N^3$, "
-             "$7N^3-6N^2$ nonzeros; 20-iteration timing runs and complete solves")
+    suptitle(fig, "Serial solver: cost against problem size")
     save(fig, "sizes")
     tables["sizes"] = [f"{int(r.N0)} & {r.n / 1e6:.2f} & {r.nnz / 1e6:.1f} & {5 * r.n * 8 / 2 ** 20:.0f} & "
                        f"{1e3 * r.t:.2f} & {r.nspt:.2f} & {r.bw:.1f} & {int(r.iters)} & {r.ts:.1f} & "
                        f"${sci(r.err, 2)}$ \\\\" for _, r in z.iterrows()]
-    big = z[z.N0 >= 128]
+    big = z
     slope_t = math.log(big.t.iloc[-1] / big.t.iloc[0]) / math.log(big.N0.iloc[-1] / big.N0.iloc[0])
     slope_s = math.log(big.ts.iloc[-1] / big.ts.iloc[0]) / math.log(big.N0.iloc[-1] / big.N0.iloc[0])
     r64, r512 = z.iloc[0], z.iloc[-1]
@@ -211,7 +215,8 @@ def fig_sizes(d, macros, tables):
                    "SzBwLarge": fmt(r512.bw, 1), "SzSlopeIter": fmt(slope_t, 2), "SzSlopeSolve": fmt(slope_s, 2),
                    "SzItPerN": fmt(k, 2), "SzItMin": str(int(r64.iters)), "SzItMax": str(int(r512.iters)),
                    "SzSolveMin": fmt(r64.ts, 2), "SzSolveMax": fmt(r512.ts, 0),
-                   "SzSolveMaxMin": fmt(r512.ts / 60, 1), "SzTiterMax": fmt(1e3 * r512.t, 0)})
+                   "SzSolveMaxMin": fmt(r512.ts / 60, 1), "SzTiterMax": fmt(1e3 * r512.t, 0),
+                   "SzBwMin": fmt(z.bw.min(), 0), "SzBwMax": fmt(z.bw.max(), 0)})
     return z
 
 

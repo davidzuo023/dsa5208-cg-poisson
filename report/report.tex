@@ -446,14 +446,16 @@ compiled with \code{nvc} \GpuNVC{} of the NVIDIA HPC SDK (\code{-O3 -mp=gpu -gpu
 the matrix dimension grows from $0.26$ to $134$ million and the number of nonzeros from $1.8$ to $938$
 million. The time per iteration grows like $N^{\SzSlopeIter}$, i.e.\ linearly in the number of unknowns, as
 expected for a matrix-free method whose every kernel is a sweep over the vectors. The cost per grid point
-is the more telling quantity. At $N=\SzNmin$ the five vectors occupy 10\,MB and fit into the processor
-caches, and an update costs \SzNsSmall\,ns; from $N=128$ on the vectors live in DRAM and the cost settles
-near \SzNsLarge\,ns, which corresponds to \SzBwLarge\,GB/s of memory traffic---the bandwidth one core can
-draw (\cref{sec:strong}). The iteration count grows linearly in $N$, from \SzItMin{} to \SzItMax{}
-iterations ($\approx\SzItPerN\,N$), so the time to solution grows like $N^{\SzSlopeSolve}$ and reaches
-\SzSolveMax\,s on the $512^3$ grid. Doubling the resolution makes the solve sixteen times more expensive;
-this is the work that the parallel solver has to distribute. The serial run on the $512^3$ grid that the
-speedups below refer to was repeated on a \NodeCPU{} node and takes \SerialTiter\,ms per iteration.
+stays between \SzNsMin{} and \SzNsMax\,ns over the whole range, with no step where the five vectors (10\,MB
+at $N=\SzNmin$, 5\,GB at $N=\SzNmax$) outgrow the 67\,MB L3 cache of a socket: one core draws
+\SzBwMin--\SzBwMax\,GB/s whether the data comes from L3 or from DRAM, because its bandwidth is limited by
+the number of cache misses it can keep in flight, not by the memory level (\cref{sec:strong}). The
+iteration count grows linearly in $N$, from \SzItMin{} to \SzItMax{} iterations ($\approx\SzItPerN\,N$),
+so the time to solution grows like $N^{\SzSlopeSolve}$ and reaches \SzSolveMax\,s, \SzSolveMaxMin{}
+minutes, on the $512^3$ grid. Doubling the resolution makes the solve sixteen times more expensive; this is
+the work that the parallel solver has to distribute. The size study ran on one core of a node shared with
+other jobs ($\SzTiterMax$\,ms per $512^3$ iteration); the serial baseline for the speedups below was
+measured inside our 32-core chunk, whose other cores were idle, at \SerialTiter\,ms.
 
 \begin{figure}[t]
 \centering
@@ -466,7 +468,7 @@ power laws.}\label{fig:sizes}
 \begin{table}[t]
 \centering\small
 \caption{Serial problem-size study: unknowns and nonzeros (millions), memory of the five vectors (MiB),
-time per iteration (best of 3 runs of 20 iterations), cost per grid point, effective DRAM bandwidth (96
+time per iteration (best of three 20-iteration runs and the complete solve), cost per grid point, effective DRAM bandwidth (96
 B/point), iterations and time to $\varepsilon=10^{-8}$, and the maximum error against the exact
 solution.}\label{tab:sizes}
 \begin{tabular}{rrrrrrrrrc}
