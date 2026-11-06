@@ -59,7 +59,7 @@ DSA5208 $\cdot$ Project 3\par
 \noindent{\large\bfseries Abstract}\par
 \noindent
 The Conjugate Gradient (CG) method is the standard solver for the symmetric positive definite systems
-produced by elliptic partial differential equations, and it is notoriously hard to scale: every iteration
+produced by elliptic partial differential equations, and it is hard to scale: every iteration
 needs a nearest-neighbour exchange, two global reductions and a full sweep through memory. We build a
 matrix-free CG solver for the 3D Poisson equation in three versions---serial, hybrid MPI\,+\,OpenMP, and
 MPI\,+\,OpenMP target offload to GPUs---in which domain decomposition, halo exchange, reduction strategy and
@@ -119,7 +119,10 @@ offload solver in C, with each design choice a run-time switch so that its effec
 on an identical problem. We validate the parallel solvers point by point against the serial one and against
 an analytical solution, derive a performance model from memory traffic and communication volume, and
 instrument the solvers with per-phase timers and byte counters that explain the measured scaling rather
-than merely report it. \Cref{sec:algorithm} introduces the problem and the algorithm, \cref{sec:design}
+than merely report it. The central result is that at scale CG loses its time in the two global reductions,
+which move 16 bytes, not in the halo exchange, which moves all the data, and that this time is waiting for
+the slowest process: no reformulation of CG removes it, and only fewer participants or better balance
+shorten it. \Cref{sec:algorithm} introduces the problem and the algorithm, \cref{sec:design}
 develops the parallel design and the performance model, \cref{sec:validation} validates the
 implementation and \cref{sec:perf} analyses its performance from one core to \NodesMax{} nodes and on a
 GPU.
@@ -253,10 +256,14 @@ $\lceil\log_2P\rceil$ network latencies. Two algebraically equivalent reformulat
 The Chronopoulos--Gear variant~[2] (\code{-a cg1}) introduces the auxiliary vectors $\vb w_k=A\vb r_k$ and
 $\vb s_k=A\vb p_k$. Since $\vb p_k=\vb r_k+\beta_k\vb p_{k-1}$, linearity gives the recurrence
 $\vb s_k=\vb w_k+\beta_k\vb s_{k-1}$, and the only stencil application per iteration becomes $\vb w_k=A\vb
-r_k$. The denominator $\vb p_k^TA\vb p_k$ of $\alpha_k$ can then be expressed through $\gamma_k=\vb r_k^T\vb
-r_k$ and $\delta_k=\vb w_k^T\vb r_k$: expanding $\vb p_k^TA\vb p_k$ and using
-$\vb r_k^TA\vb p_{k-1}=-\gamma_k/\alpha_{k-1}$ and $\vb p_{k-1}^TA\vb p_{k-1}=\gamma_{k-1}/\alpha_{k-1}$ yields
+r_k$. The denominator $\vb p_k^TA\vb p_k$ of the step length then follows from the two inner products
+$\gamma_k=\vb r_k^T\vb r_k$ and $\delta_k=\vb w_k^T\vb r_k$ of the current iteration. Expanding
+$\vb p_k=\vb r_k+\beta_k\vb p_{k-1}$ and using the CG identities $\vb r_k^TA\vb p_{k-1}=-\gamma_k/\alpha_{k-1}$
+(orthogonality of successive residuals) and $\vb p_{k-1}^TA\vb p_{k-1}=\gamma_{k-1}/\alpha_{k-1}$ (definition
+of $\alpha_{k-1}$) gives
 \begin{equation}\label{eq:cg1}
+  \vb p_k^TA\vb p_k=\delta_k-\frac{2\beta_k\gamma_k}{\alpha_{k-1}}+\frac{\beta_k^2\gamma_{k-1}}{\alpha_{k-1}}
+  =\delta_k-\frac{\beta_k\gamma_k}{\alpha_{k-1}},\qquad
   \beta_k=\frac{\gamma_k}{\gamma_{k-1}},\qquad
   \alpha_k=\frac{\gamma_k}{\delta_k-\beta_k\gamma_k/\alpha_{k-1}} .
 \end{equation}
@@ -426,8 +433,8 @@ $N=64$, $P=4$; the CG and CG1 curves coincide.}\label{fig:validation}
 
 \paragraph{Setup.}
 All measurements were taken on the NUS Vanda cluster through PBS Pro. The nodes we used carry two
-\MachineCPU{} processors with \MachineCPS{} cores each and two NUMA domains (three of the eight nodes
-were CPU nodes, five were GPU nodes with the same processors whose GPUs stayed idle). The multi-node job
+\MachineCPU{} processors with \MachineCPS{} cores each and two NUMA domains (three CPU nodes and five
+GPU nodes with the same processors, whose GPUs stayed idle). The multi-node job
 requested \MachineNodes{} chunks of \MachineCPN{} cores on \MachineNodes{} different nodes, and on every node
 PBS assigned the same \MachineCPN{} cores, the odd-numbered cores 9--71, which Linux numbers on the second
 socket of these nodes. Each node thus contributes one socket and its memory controllers, and the job is a
@@ -577,9 +584,10 @@ with other jobs, so in each iteration some process finishes its sweep late, and 
 \Pmax{} processes wait for it. On one node this barrier effect costs \RedMsNode\,ms per iteration; across
 \NodesMax{} nodes, where the slowest of eight sockets sets the pace, it costs \RedMsPmax\,ms. The global
 reductions, not the halo messages, are what limits strong scaling across nodes, and they act as barriers
-far more than as messages.
+far more than as messages. The model \eqref{eq:model} charges a reduction only its latency; on a real
+machine the term that decides is the spread of the per-process sweep times, which every reduction exposes.
 
-Weak scaling (\cref{fig:weak}) separates the two regimes cleanly. With \WeakLocal$^3$ points per process
+Weak scaling (\cref{fig:weak}) separates the two regimes. With \WeakLocal$^3$ points per process
 one process completes an iteration in \WeakTone\,ms, drawing \WeakBwOne\,GB/s. Thirty-two processes on one
 socket need \WeakTnode\,ms for 32 times the data, because they share the bandwidth (\WeakBwNode\,GB/s each);
 the efficiency relative to one process falls to \WeakEffNode\%, the bandwidth wall again. From one node to
@@ -618,7 +626,7 @@ time to hide, while the overlapped mode pays for the chunked interior sweep, the
 over the boundary shell. Overlap would pay with larger faces per process or a slower network.
 
 The CG formulations confirm that the reduction time is waiting, not latency. CG1 merges the two
-reductions into one and stays within a few percent of classic CG at every process count (\RelCGonemin{} on
+reductions into one and runs at \RelCGoneRange{} times classic CG at every process count (\RelCGonemin{} on
 one node, \RelCGone{} on \NodesMax{}): a single barrier per iteration still has to wait for the slowest
 process, and that process is no faster. Pipelined CG pays its traffic surcharge almost in full on one node
 (\RelPipemin; the model predicts $128/96=1.33$ with write-allocate), and its relative cost falls to
@@ -693,8 +701,8 @@ is \GpuVsSocket{} times faster than a 32-core CPU socket, \GpuVsCore{} times fas
 \GpuVsEight{} times slower than the \NodesMax{} nodes of \cref{sec:strong}; the time ratio to the socket is the
 ratio of the bandwidths the two sustain (\GpuBwFiveTwelve{} against \CGbwNode\,GB/s, \GpuBwRatio) times the
 factor $96/88$ the GPU saves by not reading lines before writing them. With several GPUs every halo message passes
-through host memory twice, so the communication terms of \eqref{eq:model} weigh more than on the CPU; the
-validation runs of \cref{sec:validation} exercise this path on up to eight processes.
+through host memory twice; a CUDA-aware MPI would send the packed faces directly from device memory and
+remove both copies.
 
 \begin{figure}[t]
 \centering
@@ -765,8 +773,8 @@ The part of the algorithm that communicates most in time is not the part that co
 The halo exchange moves all of the data---\HaloKiBPmax\,KiB per process and iteration at $P=\Pmax$---and
 costs \HaloFracPmax\% of the iteration; the two reductions move 16 bytes and cost \RedFracPmax\%, because
 every reduction is a barrier at which \Pmax{} processes wait for the slowest one. The design choices follow
-from this. Blocks or pencils are mandatory, since slabs send as much as they compute and run \RelOneD{}
-times slower on \NodesMax{} nodes. Overlapping the halo exchange hides little and is never faster than the
+from this. Blocks are the decomposition to use: slabs send as much as they compute and run \RelOneD{}
+times slower on \NodesMax{} nodes, and pencils fall \RelTwoD{} times behind at $P=\Pmax$. Overlapping the halo exchange hides little and is never faster than the
 blocking exchange. Merging the two reductions (CG1) costs nothing but gains nothing measurable, because the
 time at the barrier is waiting, not latency. Pipelining the reduction hides its latency but not the
 waiting, adds a third more memory traffic and degrades the true residual \SolvePipeRatio-fold, so it does

@@ -487,7 +487,7 @@ def fig_variants(b, macros, tables):
                    "RelOneD": fmt(rel("1D decomposition", pm)), "RelOneDmin": fmt(rel("1D decomposition", p0)),
                    "RelTwoD": fmt(rel("2D decomposition", pm)), "RelTwoDRange": rng("2D decomposition"),
                    "RelBlocking": fmt(rel("blocking halo", pm)), "RelBlockingRange": rng("blocking halo"),
-                   "RelCGone": fmt(rel("CG1 (1 Allreduce)", pm)), "RelCGonemin": fmt(rel("CG1 (1 Allreduce)", p0)),
+                   "RelCGone": fmt(rel("CG1 (1 Allreduce)", pm)), "RelCGonemin": fmt(rel("CG1 (1 Allreduce)", p0)), "RelCGoneRange": rng("CG1 (1 Allreduce)"),
                    "RelPipe": fmt(rel("pipelined CG", pm)), "RelPipemin": fmt(rel("pipelined CG", p0)),
                    "RelPipeBlock": fmt(rel("pipelined CG + blocking halo", pm)),
                    "RelPipeTwo": fmt(float(b[b.exp == "strong2_pipe"].t_iter.iloc[-1] /
