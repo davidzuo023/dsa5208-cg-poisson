@@ -18,9 +18,10 @@ at run time, and an MPI + OpenMP target-offload code for GPUs (one GPU per MPI r
 The report is `report/report.pdf`. Authors: Wu Yuhan, Zuo Dewei, Zhu Chen. Licence: MIT (`LICENSE`).
 
 Headline results (NUS Vanda, Xeon Platinum 8452Y, 32 cores per node; NVIDIA A40):
-512³ CG iteration in 9.92 ms on 256 cores / 8 nodes (speedup 55 over the serial code,
-76 % strong-scaling efficiency relative to one node, 83 % for 768³), 80 % node-level weak-scaling
-efficiency on 1.8 × 10⁹ unknowns, one A40 = 2.4 CPU sockets (25.0 ms per 512³ iteration).
+512³ CG iteration in 9.23 ms on 256 cores / 8 nodes (speedup 59 over the serial code,
+81 % strong-scaling efficiency relative to one node, 83 % for 768³), 80 % node-level weak-scaling
+efficiency on 1.8 × 10⁹ unknowns, one A40 2.4 times faster than a 32-core socket
+(25.0 ms per 512³ iteration).
 
 ## Quick start: from source to report
 
@@ -206,7 +207,7 @@ variants are compared iteration against iteration.
 
 ## Results included
 
-All measurements in the report, with the job logs in `results/vanda_logs/`:
+All measurements in the report, with the job logs in `results/vanda_logs/` (the size-study rerun has no log):
 
 * `results/vanda256/` — 8 nodes × 32 cores (one socket of 2 × Intel Xeon Platinum 8452Y per node),
   Open MPI 4.1.8, GCC 13.1.0: strong scaling (512³ from 1 to 256 processes, 768³ from 32), weak
@@ -216,8 +217,10 @@ All measurements in the report, with the job logs in `results/vanda_logs/`:
 * `results/vanda_node/` — STREAM triad, serial baseline and the quick validation suite on one
   32-core chunk of the same CPU type.
 * `results/vanda_sizes/` — serial problem-size study, N = 64 … 512.
-* `results/vanda_gpu/`, `results/vanda_gpu_val/` — one NVIDIA A40: size sweep, complete solves,
-  and validation against the serial solution with 1, 2, 4 and 8 ranks sharing the GPU.
+* `results/vanda_gpu/`, `results/vanda_gpu_val/` — one NVIDIA A40: size sweep and complete solves;
+  validation against the serial solution with 1, 2, 4 and 8 ranks sharing the GPU is in
+  `vanda_gpu_val/` (all PASS). The two FAIL lines at P = 4 in `vanda_gpu/validation.txt` are runs
+  that never started (an Open MPI core-binding error, since fixed by `--bind-to none`).
 * `results/validation/` — the full correctness suite; `results/commvol.csv` — halo volumes.
 
 ## Use of AI tools

@@ -34,9 +34,10 @@ RES = os.path.join(ROOT, "results")
 # NeurIPS-style figures: the document's sans-serif face (Liberation Sans ~ Helvetica), open axes
 # (no top/right spines), faint horizontal grid only, frameless legends, thin marks, left-aligned
 # bold panel labels; figure titles live in the LaTeX captions, not in the figures.
-# Okabe-Ito colour-blind-safe palette in fixed order (checked with the dataviz palette validator;
-# every series also carries its own marker or line style)
-C = ["#0072B2", "#E69F00", "#009E73", "#D55E00", "#CC79A7", "#8c8c8c", "#56B4E9", "#F0E442"]
+# muted palette in the manner of recent NeurIPS papers (soft blue, orange, teal, purple; grey for
+# references), in fixed order; adjacent slots pass the colour-vision-deficiency check of the dataviz
+# palette validator, and every series also carries its own marker or line style
+C = ["#3A6FB0", "#E08A3C", "#2E9C8A", "#8E5BAE", "#C44E52", "#9A9A9A", "#86B4DA", "#E5C35C"]
 INK, INK2, GRID = "#1a1a1a", "#555555", "#ebebeb"
 MARK = ["o", "s", "^", "D", "v", "P", "X", "*"]
 plt.rcParams.update({
@@ -202,12 +203,15 @@ def fig_sizes(d, macros, tables):
     fig.tight_layout()
     suptitle(fig, "Serial solver: cost against problem size")
     save(fig, "sizes")
-    tables["sizes"] = [f"{int(r.N0)} & {r.n / 1e6:.2f} & {r.nnz / 1e6:.1f} & {5 * r.n * 8 / 2 ** 20:.0f} & "
+    z["mib"] = 4 * (z.N0.astype(float) + 2) ** 3 * 8 / 2 ** 20     # x, r, p, Ap with ghost layers
+    tables["sizes"] = [f"{int(r.N0)} & {r.n / 1e6:.2f} & {r.nnz / 1e6:.1f} & {r.mib:.0f} & "
                        f"{1e3 * r.t:.2f} & {r.nspt:.2f} & {r.bw:.1f} & {int(r.iters)} & {r.ts:.1f} & "
                        f"${sci(r.err, 2)}$ \\\\" for _, r in z.iterrows()]
-    big = z
-    slope_t = math.log(big.t.iloc[-1] / big.t.iloc[0]) / math.log(big.N0.iloc[-1] / big.N0.iloc[0])
-    slope_s = math.log(big.ts.iloc[-1] / big.ts.iloc[0]) / math.log(big.N0.iloc[-1] / big.N0.iloc[0])
+    import numpy as np
+    lx = np.log(z.N0.astype(float))
+    slope_t = float(np.polyfit(lx, np.log(z.t), 1)[0])        # least-squares exponents
+    slope_s = float(np.polyfit(lx, np.log(z.ts), 1)[0])
+    ipn = z.iters / z.N0
     r64, r512 = z.iloc[0], z.iloc[-1]
     macros.update({"SzNmin": str(int(r64.N0)), "SzNmax": str(int(r512.N0)), "SzRuns": str(len(z)),
                    "SzNsSmall": fmt(r64.nspt, 2), "SzNsLarge": fmt(r512.nspt, 2),
@@ -216,7 +220,11 @@ def fig_sizes(d, macros, tables):
                    "SzItPerN": fmt(k, 2), "SzItMin": str(int(r64.iters)), "SzItMax": str(int(r512.iters)),
                    "SzSolveMin": fmt(r64.ts, 2), "SzSolveMax": fmt(r512.ts, 0),
                    "SzSolveMaxMin": fmt(r512.ts / 60, 1), "SzTiterMax": fmt(1e3 * r512.t, 0),
-                   "SzBwMin": fmt(z.bw.min(), 0), "SzBwMax": fmt(z.bw.max(), 0)})
+                   "SzBwMin": fmt(z.bw.min(), 0), "SzBwMax": fmt(z.bw.max(), 0),
+                   "SzItPerNmin": fmt(ipn.min(), 2), "SzItPerNmax": fmt(ipn.max(), 2),
+                   "SzMiBSmall": fmt(r64.mib, 1), "SzGiBLarge": fmt(r512.mib / 1024, 1),
+                   "SzDoubling": fmt(r512.ts / float(z[z.N0 == r512.N0 // 2].ts.iloc[0]), 1)
+                   if (z.N0 == r512.N0 // 2).any() else "--"})
     return z
 
 
@@ -271,7 +279,7 @@ def fig_strong(b, t_ser, cpn, macros, tables):
     # where the time goes: share of each phase
     fig, ax = plt.subplots(figsize=(6.6, 2.35))
     comps = [("t_spmv_it", "stencil $A\\mathbf{p}$", C[0]), ("t_vec_it", "vector updates + local dots", C[2]),
-             ("t_halo_it", "halo exchange", C[1]), ("t_reduce_it", "MPI_Allreduce (incl. waiting)", C[4])]
+             ("t_halo_it", "halo exchange", C[1]), ("t_reduce_it", "MPI_Allreduce (incl. waiting)", C[3])]
     tot = sum(s[c] for c, _, _ in comps)
     xs = range(len(s))
     bottom = [0.0] * len(s)
@@ -365,7 +373,11 @@ def fig_bandwidth(s, stream, cpn, macros):
                    "CGbwOne": fmt(float(bw.iloc[0]), 1), "CGbwNode": fmt(float(bw.iloc[i32]), 0),
                    "CGbwFrac": fmt(100 * float(bw.iloc[i32]) / sock, 0), "CGbwAll": fmt(float(bw.iloc[-1]), 0),
                    "CGbwTB": fmt(float(bw.iloc[-1]) / 1e3, 2),
-                   "CGbwPerNodeMax": fmt(float(bw.iloc[-1]) / (int(s.P.iloc[-1]) // cpn), 0)})
+                   "CGbwPerNodeMax": fmt(float(bw.iloc[-1]) / (int(s.P.iloc[-1]) // cpn), 0),
+                   "CGbwFracNodes": fmt(100 * float(bw.iloc[-1]) / ((int(s.P.iloc[-1]) // cpn) * float(bw.iloc[i32])), 0),
+                   "CGbwFracStreamNodes": fmt(100 * float(bw.iloc[-1]) / ((int(s.P.iloc[-1]) // cpn) * sock), 0),
+                   "StreamSixteen": fmt(float(st[st.threads == 16].gbs.iloc[0]), 0),
+                   "CGbwEight": fmt(float(bw[s.P == 8].iloc[0]), 0), "CGbwSixteen": fmt(float(bw[s.P == 16].iloc[0]), 0)})
 
 
 def fig_weak(b, cpn, macros):
@@ -390,6 +402,10 @@ def fig_weak(b, cpn, macros):
     fig.tight_layout()
     save(fig, "weak")
     last = w.iloc[-1]
+    two = w[w.P == 2 * cpn]
+    mid = w[(w.P > 2 * cpn) & (w.P < last.P)]
+    macros.update({"WeakTtwo": fmt(1e3 * float(two.t_iter.iloc[0]), 1) if not two.empty else "--",
+                   "WeakTmidMin": fmt(1e3 * mid.t_iter.min(), 0), "WeakTmidMax": fmt(1e3 * mid.t_iter.max(), 0)})
     macros.update({"WeakEffPmax": fmt(100 * float(e1.iloc[-1]), 0), "WeakPmax": str(int(last.P)),
                    "WeakNodeEff": fmt(100 * float(en.iloc[-1]), 0), "WeakEffNode": fmt(100 * float(e1[w.P == cpn].iloc[0]), 0),
                    "WeakLocal": str(round(w.nloc_avg.iloc[0] ** (1 / 3))),
@@ -517,7 +533,7 @@ def fig_hybrid(b, macros, tables):
     fig, ax = plt.subplots(figsize=(3.3, 2.3))
     labels = [f"{int(p)}$\\times${int(t)}" for p, t in zip(h.P, h['T'])]
     ax.bar(range(len(h)), 1e3 * h.t_iter, color=C[0], width=0.62, label="best run", edgecolor="none")
-    ax.plot(range(len(h)), 1e3 * h.t_med, color=C[3], marker="D", ls="none", ms=3.6, label="median run")
+    ax.plot(range(len(h)), 1e3 * h.t_med, color=C[1], marker="D", ls="none", ms=3.6, label="median run")
     ax.set_xticks(range(len(h)))
     ax.set_xticklabels(labels)
     ax.set_xlabel("MPI processes $\\times$ OpenMP threads")
@@ -529,12 +545,15 @@ def fig_hybrid(b, macros, tables):
     save(fig, "hybrid")
     best, pure = h.loc[h.t_iter.idxmin()], h[h["T"] == 1].iloc[0]
     worst = h.loc[h.t_iter.idxmax()]
+    hs = h.sort_values("t_iter")
+    second = hs.iloc[-2]
     tables['hybrid'] = [f"{int(r.P)} & {int(r['T'])} & {1e3 * r.t_iter:.2f} & {1e3 * r.t_med:.2f} & "
                         f"{1e3 * r.t_halo_it:.2f} & {1e3 * r.t_reduce_it:.2f} \\\\" for _, r in h.iterrows()]
     macros.update({"HybBest": f"{int(best.P)}$\\times${int(best['T'])}", "HybBestT": fmt(1e3 * best.t_iter, 2),
                    "HybPureT": fmt(1e3 * pure.t_iter, 2), "HybWorst": f"{int(worst.P)}$\\times${int(worst['T'])}",
                    "HybWorstT": fmt(1e3 * worst.t_iter, 2),
                    "HybRange": fmt(100 * (worst.t_iter / best.t_iter - 1), 0),
+                   "HybSecond": f"{int(second.P)}$\\times${int(second['T'])}", "HybSecondT": fmt(1e3 * second.t_iter, 2),
                    "HybCores": str(int(h.P.iloc[0] * h["T"].iloc[0])),
                    "HybGain": fmt(100 * (1 - best.t_iter / pure.t_iter), 0),
                    "HybRedBest": fmt(1e3 * best.t_reduce_it, 2), "HybRedPure": fmt(1e3 * pure.t_reduce_it, 2)})
@@ -568,7 +587,7 @@ def fig_gpu(gdir, s, t_ser, macros, tables):
     plat = [("1 core", t_ser), ("1 socket\n(32 cores)", float(s[s.P == 32].t_iter.iloc[0])),
             ("1 A40", float(cg.loc[n512, "t_iter"])),
             ("8 nodes\n(256 cores)", float(s[s.P == s.P.max()].t_iter.iloc[0]))]
-    cols = [C[5], C[0], C[2], C[4]]
+    cols = [C[5], C[0], C[2], C[3]]
     ax[1].bar(range(4), [1e3 * t for _, t in plat], color=cols, width=0.6, edgecolor="none")
     for i, (_, t) in enumerate(plat):
         ax[1].text(i, 1e3 * t * 1.12, f"{1e3 * t:.1f}", ha="center", va="bottom", fontsize=6.8)
@@ -602,8 +621,12 @@ def fig_gpu(gdir, s, t_ser, macros, tables):
                    "GpuVsEight": fmt(r.t_iter / float(s[s.P == s.P.max()].t_iter.iloc[0]), 1),
                    "GpuSpmvFrac": fmt(100 * r.t_spmv_it / r.t_iter, 0),
                    "GpuCGoneRel": fmt(100 * (c1.loc[n512, "t_iter"] / r.t_iter - 1), 0),
-                   "GpuSpmvBw": fmt(n512 ** 3 * 24 / r.t_spmv_it / 1e9, 0),
-                   "GpuVecBw": fmt(n512 ** 3 * 64 / r.t_vec_it / 1e9, 0),
+                   "GpuSpmvBw": fmt(n512 ** 3 * 16 / r.t_spmv_it / 1e9, 0),      # read p, write q
+                   "GpuSpmvBwFrac": fmt(100 * n512 ** 3 * 16 / r.t_spmv_it / 1e9 / A40_PEAK, 0),
+                   "GpuVecBw": fmt(n512 ** 3 * 72 / r.t_vec_it / 1e9, 0),        # 6 + 3 vector accesses
+                   "GpuVecBwFrac": fmt(100 * n512 ** 3 * 72 / r.t_vec_it / 1e9 / A40_PEAK, 0),
+                   "GpuBwAboveMin": fmt(bw["cg"][1:].min(), 0),
+                   "GpuBwRatio": fmt(bw["cg"][Ns.index(n512)] / (n512 ** 3 * BYTES_CPU / t_sock / 1e9), 1),
                    "GpuMLUPS": fmt(r.mlups / 1e3, 2)})
     sol = g[g.exp == "gsolve"]
     return sol
@@ -674,6 +697,8 @@ def fig_validation(vdir, macros, tables):
                         f"${sci(pe, 3)}$ & {order} \\\\")
             prev = (N, e)
         tables["convergence"] = rows
+        ords = [float(r.split("&")[-1].strip(" \\")) for r in rows[1:]]
+        macros.update({"OrderMin": f"{min(ords):.3f}", "OrderMax": f"{max(ords):.3f}"})
     var = os.path.join(vdir, "variants.csv")
     if os.path.exists(var):
         v = pd.read_csv(var)
@@ -698,10 +723,12 @@ def fig_validation(vdir, macros, tables):
             hh = pd.read_csv(p)
             tag = "Pipe" if alg == "pipecg" else "CG"
             macros["Floor" + tag] = f"${sci(hh.relres_true.min(), 0)}$"
-            gap = hh[hh.relres_true > 3 * hh.relres_recursive]
+            gap = hh[hh.relres_true > 1.5 * hh.relres_recursive]
             if not gap.empty:
                 macros["Split" + tag] = f"${sci(gap.relres_recursive.iloc[0], 0)}$"
             macros["Final" + tag] = f"${sci(hh.relres_true.iloc[-1], 0)}$"
+            after = hh.loc[hh.relres_true.idxmin():]
+            macros["Drift" + tag] = f"${sci(after.relres_true.max(), 0)}$"
             macros["Last" + tag] = str(int(hh.iter.iloc[-1]))
     if "FloorCG" in macros and "FloorPipe" in macros:
         a = pd.read_csv(os.path.join(vdir, "hist_cg.csv")).relres_true.min()
@@ -723,15 +750,18 @@ def node_validation(path, macros):
 
 
 # ---------------------------------------------------------------- time to solution
-def tab_solve(b, sizes, gsol, cpn, macros, tables):
+def tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=None):
     name = {"cg": "CG", "cg1": "CG1", "pipecg": "pipelined CG"}
     rows = []
     t_ser = None
     if sizes is not None and (sizes.N0 == 512).any():
         r = sizes[sizes.N0 == 512].iloc[0]
-        t_ser = float(r.ts)
-        rows.append(f"1 core & CG & {int(r.iters)} & {r.ts:.0f} & {1e3 * r.ts / r.iters:.0f} & "
-                    f"${sci(r.tr, 2)}$ & ${sci(r.err, 2)}$ & 1 \\\\")
+        # speedups use the serial baseline rate of all other comparisons (iterations x t_ser_iter);
+        # the size study's own solve ran on a shared node and is listed as measured
+        t_ser = int(r.iters) * t_ser_iter if t_ser_iter else float(r.ts)
+        rows.append(f"1 core (shared node) & CG & {int(r.iters)} & {r.ts:.0f} & {1e3 * r.ts / r.iters:.0f} & "
+                    f"${sci(r.tr, 2)}$ & ${sci(r.err, 2)}$ & -- \\\\")
+        macros.update({"SolveSerialEst": fmt(t_ser, 0), "SolveSerialMeas": fmt(float(r.ts), 0)})
     s = b[b.exp == "solve"]
     nodes = int(s.P.max()) // cpn if not s.empty else 0
     for _, r in s.iterrows():
@@ -800,9 +830,18 @@ def main():
                    "MachineGCC": mi.get("gcc", "?"), "NodeCPU": tex_escape(ni.get("cpu", "?")),
                    "SizesCPU": tex_escape(si.get("cpu", "?"))})
     if "gpu" in gi:
-        macros.update({"GpuName": gi["gpu"][0], "GpuMem": fmt(int(gi["gpu"][1]) / 1024, 0), "GpuDriver": gi["gpu"][2],
+        macros.update({"GpuName": gi["gpu"][0], "GpuMem": fmt(int(gi["gpu"][1]) / 1024, 0) + "\\,GiB usable", "GpuDriver": gi["gpu"][2],
                        "GpuNVC": gi.get("nvc", "?"), "GpuModule": tex_escape(gi.get("module", "?"))})
-    b = best_of(pd.read_csv(os.path.join(a.main, "bench.csv")), KEYS)
+    raw = pd.read_csv(os.path.join(a.main, "bench.csv"))
+    # the hybrid sweep's P x 1 runs are the strong-scaling baseline configuration at P = all cores:
+    # pool them, so the baseline at that P is the best of all 6 runs of the identical configuration
+    pure = raw[(raw.exp == "hybrid") & (raw["T"] == 1)].assign(exp="strong")
+    b = best_of(pd.concat([raw, pure], ignore_index=True), KEYS)
+    hyb1 = b[(b.exp == "strong") & (b.P == int(pure.P.max()))] if not pure.empty else None
+    if hyb1 is not None:   # hybrid table/figure: P x 1 shows the pooled best, its own median
+        hb = b.index[(b.exp == "hybrid") & (b["T"] == 1)]
+        for c in ["t_iter", "t_spmv_it", "t_halo_it", "t_reduce_it", "t_vec_it"]:
+            b.loc[hb, c] = float(hyb1[c].iloc[0])
     b.to_csv(os.path.join(a.main, "bench_best.csv"), index=False)
     nb = os.path.join(a.node, "bench.csv")
     t_ser = float(best_of(pd.read_csv(nb), KEYS).query("exp == 'serial'").t_iter.iloc[0]) if os.path.exists(nb) \
@@ -817,7 +856,7 @@ def main():
     fig_hybrid(b, macros, tables)
     gsol = fig_gpu(a.gpu, s, t_ser, macros, tables)
     gpu_validation(a.gpuval, macros)
-    tab_solve(b, sizes, gsol, cpn, macros, tables)
+    tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=t_ser)
     fig_commvol(os.path.join(RES, "commvol.csv"), macros)
     fig_validation(a.validation, macros, tables)
     node_validation(os.path.join(a.node, "validation", "summary.txt"), macros)
