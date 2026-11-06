@@ -45,6 +45,10 @@ gpu: | $(BIN)
 $(BIN)/cg_gpu: $(SRC)/cg_gpu.c $(SRC)/common.h | $(BIN)
 	$(GPUCC) $(GPUFLAGS) -o $@ $< $(LDLIBS)
 
+# Word version of the report (needs pandoc and python-docx; run after `make report`)
+docx:
+	python3 scripts/make_docx.py
+
 test: all
 	bash scripts/validate.sh quick
 
@@ -57,4 +61,4 @@ report:
 clean:
 	rm -rf $(BIN) *.bin
 
-.PHONY: all gpu test report clean
+.PHONY: all gpu test report docx clean
