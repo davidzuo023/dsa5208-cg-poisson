@@ -27,7 +27,7 @@ for mod in nvhpc-hpcx-cuda12/26.1 nvhpc-hpcx-2.20-cuda12/26.1 nvhpc/24.5 nvhpc/2
     nvc -O3 -o $BIN/cg_serial src/cg_serial.c -lm || continue
     make -B BIN=$BIN GPUCC=mpicc GPUFLAGS="-O3 -mp=gpu -gpu=cc86 -Minfo=mp" $BIN/cg_gpu || continue
     # smoke test: OMP_TARGET_OFFLOAD=MANDATORY refuses to fall back to the host
-    if OMP_TARGET_OFFLOAD=MANDATORY mpirun -np 1 $BIN/cg_gpu -n 64; then ok=1; export GPU_MODULE=$mod; echo "== using $mod"; break; fi
+    if OMP_TARGET_OFFLOAD=MANDATORY mpirun --bind-to none -np 1 $BIN/cg_gpu -n 64; then ok=1; export GPU_MODULE=$mod; echo "== using $mod"; break; fi
     echo "-- $mod: GPU run failed"
 done
 (( ok )) || { echo "no working GPU toolchain found"; exit 1; }

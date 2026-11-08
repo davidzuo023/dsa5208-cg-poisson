@@ -10,7 +10,7 @@ MACHINE=${MACHINE:-gpu}
 BIN=${BIN:-bin}
 ITERS=${ITERS:-50}
 REPS=${REPS:-3}
-MPIRUN=${MPIRUN:-mpirun}
+MPIRUN=${MPIRUN:-"mpirun --bind-to none"}   # GPU nodes give the job a cpuset that core binding can trip over
 GPU_SIZES=${GPU_SIZES:-"128 192 256 384 512 640 768"}
 export OMP_TARGET_OFFLOAD=${OMP_TARGET_OFFLOAD:-MANDATORY}   # fail instead of silently running on the host
 export CUDA_MODULE_LOADING=EAGER                              # no lazy kernel loading inside timed loops
@@ -62,7 +62,7 @@ ser=/tmp/ser40.$$.bin gpu=/tmp/gpu40.$$.bin nfail=0
 "$BIN/cg_serial" -n 40 -q -o $ser > /dev/null
 for P in $VAL_P; do for a in cg cg1; do
     rm -f $gpu
-    l=$($MPIRUN --oversubscribe --bind-to none -np "$P" "$BIN/cg_gpu" -n 40 -a $a -q -o $gpu | csv) || true
+    l=$($MPIRUN --oversubscribe -np "$P" "$BIN/cg_gpu" -n 40 -a $a -q -o $gpu | csv) || true
     d=nan; [[ -f $gpu ]] && d=$(python3 scripts/compare_bin.py $gpu $ser 2>/dev/null || echo nan)
     ok=$(python3 -c "import sys; d=float(sys.argv[1]); print('PASS' if d == d and d < 1e-10 else 'FAIL')" "$d" 2>/dev/null || echo FAIL)
     [[ $ok == PASS ]] || nfail=$((nfail + 1))
@@ -82,8 +82,8 @@ done; done; done
 # 3. several GPUs (if the job has them): strong (512^3) and weak (~384^3 per GPU) scaling
 if (( NGPU > 1 )); then
     for rep in $(seq 1 "$REPS"); do for P in $(seq 1 "$NGPU"); do
-        record gstrong "$rep" $MPIRUN -np "$P" --bind-to none "$BIN/cg_gpu" -n "${GSTRONG_N:-512}" -t 0 -m "$ITERS" -q
-        record gweak "$rep" $MPIRUN -np "$P" --bind-to none "$BIN/cg_gpu" -L "${GWEAK_L:-384}" -t 0 -m "$ITERS" -q
+        record gstrong "$rep" $MPIRUN -np "$P" "$BIN/cg_gpu" -n "${GSTRONG_N:-512}" -t 0 -m "$ITERS" -q
+        record gweak "$rep" $MPIRUN -np "$P" "$BIN/cg_gpu" -L "${GWEAK_L:-384}" -t 0 -m "$ITERS" -q
     done; done
 fi
 
@@ -92,7 +92,7 @@ if [[ ${GPU_2D:-0} == 1 ]]; then
     "$BIN/cg_serial" -D 2 -n 100 -q -o /tmp/ser2d.$$.bin > /dev/null
     for P in 1 2 4; do for a in cg cg1; do
         rm -f /tmp/gpu2d.$$.bin
-        l=$($MPIRUN --oversubscribe --bind-to none -np "$P" "$BIN/cg_gpu" -D 2 -n 100 -a $a -q -o /tmp/gpu2d.$$.bin | csv) || true
+        l=$($MPIRUN --oversubscribe -np "$P" "$BIN/cg_gpu" -D 2 -n 100 -a $a -q -o /tmp/gpu2d.$$.bin | csv) || true
         d=nan; [[ -f /tmp/gpu2d.$$.bin ]] && d=$(python3 scripts/compare_bin.py /tmp/gpu2d.$$.bin /tmp/ser2d.$$.bin 2>/dev/null || echo nan)
         ok=$(python3 -c "import sys; d=float(sys.argv[1]); print('PASS' if d == d and d < 1e-10 else 'FAIL')" "$d" 2>/dev/null || echo FAIL)
         [[ -n $l ]] && echo "validate2d,1,$l" >> "$CSV"
