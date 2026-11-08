@@ -7,11 +7,12 @@
  * through host buffers (`omp target update`), exchanged with MPI_Sendrecv and unpacked on
  * the GPU. Reductions: the local part is an OpenMP reduction on the GPU, the global part an
  * MPI_Allreduce on the host. Algorithms: classic CG (-a cg) and Chronopoulos-Gear (-a cg1).
+ * Problems: 3D 7-point (default) and 2D 5-point (-D 2, stored as N x 1 x N like cg_mpi.c).
  *
  * Build (NVIDIA HPC SDK):  mpicc -O3 -mp=gpu -gpu=cc86 -o cg_gpu cg_gpu.c -lm
  * Host fallback (testing): mpicc -O2 -fopenmp -o cg_gpu cg_gpu.c -lm
  *
- * Usage: mpirun -np P ./cg_gpu [-n N | -L nloc] [-a cg|cg1] [-t tol] [-m maxit] [-o dump] [-q] [-H]
+ * Usage: mpirun -np P ./cg_gpu [-D 2|3] [-n N | -L nloc] [-a cg|cg1] [-t tol] [-m maxit] [-o dump] [-q] [-H]
  */
 #define _POSIX_C_SOURCE 200809L
 #include <mpi.h>
@@ -23,7 +24,7 @@
 #include "common.h"
 
 typedef struct {
-    int N, dims[3], coords[3], n[3], off[3], nbr[3][2];
+    int N, Nj, dim, dims[3], coords[3], n[3], off[3], nbr[3][2];
     MPI_Comm cart;
     int rank, size, device, ndev;
     size_t sI, sJ, ntot, fsz[3];
@@ -136,6 +137,18 @@ static double spmv(Ctx *c, double *x, double *y)
     const int n0 = c->n[0], n1 = c->n[1], n2 = c->n[2];
     const size_t sI = c->sI, sJ = c->sJ, nt = c->ntot;
     double dot = 0.0;
+    if (c->dim == 2) { /* 5-point stencil in the (i,k) plane, j = 1 only */
+#pragma omp target teams distribute parallel for collapse(2) reduction(+ : dot) map(alloc : x[0:nt], y[0:nt])
+        for (int i = 1; i <= n0; i++)
+            for (int k = 1; k <= n2; k++) {
+                const size_t m = i * sI + sJ + k;
+                const double v = 4.0 * x[m] - x[m - sI] - x[m + sI] - x[m - 1] - x[m + 1];
+                y[m] = v;
+                dot += x[m] * v;
+            }
+        c->t_spmv += MPI_Wtime() - t;
+        return dot;
+    }
 #pragma omp target teams distribute parallel for collapse(3) reduction(+ : dot) map(alloc : x[0:nt], y[0:nt])
     for (int i = 1; i <= n0; i++)
         for (int j = 1; j <= n1; j++)
@@ -275,7 +288,7 @@ static void verify(Ctx *c, double *x, double *Ax, double bnorm, double *tr, doub
     MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, c->cart);
     *tr = sqrt(sums[0]) / bnorm;
     *em = mx;
-    *el = sqrt(sums[1] * c->h * c->h * c->h);
+    *el = sqrt(sums[1] * pow(c->h, c->dim));
 }
 
 static void allreduce(Ctx *c, double *buf, int n)
@@ -290,7 +303,7 @@ static void dump_solution(Ctx *c, double *x, const char *fname)
     const size_t nt = c->ntot;
 #pragma omp target update from(x[0:nt])
     MPI_Datatype ft, mt;
-    int gs[3] = {c->N, c->N, c->N}, ls[3] = {c->n[0], c->n[1], c->n[2]}, st[3] = {c->off[0], c->off[1], c->off[2]};
+    int gs[3] = {c->N, c->Nj, c->N}, ls[3] = {c->n[0], c->n[1], c->n[2]}, st[3] = {c->off[0], c->off[1], c->off[2]};
     int ms[3] = {c->n[0] + 2, c->n[1] + 2, c->n[2] + 2}, mst[3] = {1, 1, 1};
     MPI_Type_create_subarray(3, gs, ls, st, MPI_ORDER_C, MPI_DOUBLE, &ft);
     MPI_Type_create_subarray(3, ms, ls, mst, MPI_ORDER_C, MPI_DOUBLE, &mt);
@@ -317,11 +330,13 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &c->rank);
     MPI_Comm_size(MPI_COMM_WORLD, &c->size);
     int N = 128, L = 0, quiet = 0, opt, cg1 = 0;
+    c->dim = 3;
     double tol = 1e-8;
     long maxit = -1;
     const char *dump = NULL;
-    while ((opt = getopt(argc, argv, "n:L:a:t:m:o:qH")) != -1) {
+    while ((opt = getopt(argc, argv, "D:n:L:a:t:m:o:qH")) != -1) {
         switch (opt) {
+        case 'D': c->dim = atoi(optarg); break;
         case 'n': N = atoi(optarg); break;
         case 'L': L = atoi(optarg); break;
         case 'a': cg1 = !strcmp(optarg, "cg1"); break;
@@ -334,7 +349,7 @@ int main(int argc, char **argv)
             MPI_Finalize();
             return 0;
         default:
-            if (c->rank == 0) fprintf(stderr, "usage: %s [-n N|-L n] [-a cg|cg1] [-t tol] [-m maxit] [-o f] [-q]\n", argv[0]);
+            if (c->rank == 0) fprintf(stderr, "usage: %s [-D 2|3] [-n N|-L n] [-a cg|cg1] [-t tol] [-m maxit] [-o f] [-q]\n", argv[0]);
             MPI_Finalize();
             return 1;
         }
@@ -352,18 +367,22 @@ int main(int argc, char **argv)
 
     MPI_Barrier(MPI_COMM_WORLD);
     const double ts0 = MPI_Wtime();
+    if (c->dim != 2 && c->dim != 3) die(c, "-D must be 2 or 3");
     int dims[3] = {0, 0, 0}, periods[3] = {0, 0, 0};
+    if (c->dim == 2) dims[1] = 1;
     MPI_Dims_create(c->size, 3, dims);
     MPI_Cart_create(MPI_COMM_WORLD, 3, dims, periods, 1, &c->cart);
     MPI_Comm_rank(c->cart, &c->rank);
     MPI_Cart_coords(c->cart, c->rank, 3, c->coords);
-    if (L > 0) N = (int)lround(L * cbrt((double)c->size));
+    if (L > 0) N = (int)lround(L * (c->dim == 3 ? cbrt((double)c->size) : sqrt((double)c->size)));
     c->N = N;
+    c->Nj = c->dim == 3 ? N : 1;
     if (maxit < 0) maxit = 50L * N + 100;
     c->h = 1.0 / (N + 1);
     for (int d = 0; d < 3; d++) {
         c->dims[d] = dims[d];
-        const int q = N / dims[d], rem = N % dims[d];
+        const int Nd = d == 1 ? c->Nj : N;
+        const int q = Nd / dims[d], rem = Nd % dims[d];
         c->n[d] = q + (c->coords[d] < rem);
         c->off[d] = c->coords[d] * q + (c->coords[d] < rem ? c->coords[d] : rem);
         MPI_Cart_shift(c->cart, d, 1, &c->nbr[d][0], &c->nbr[d][1]);
@@ -392,8 +411,8 @@ int main(int argc, char **argv)
         c->gd[d] = malloc((size_t)(c->n[d] + 2) * sizeof(double));
         for (int l = 0; l <= c->n[d] + 1; l++) {
             const double t = (c->off[d] + l) * c->h;
-            c->g[d][l] = g_fun(t);
-            c->gd[d][l] = g_dd(t);
+            c->g[d][l] = (c->dim == 2 && d == 1) ? 1.0 : g_fun(t);   /* 2D: u = g(x) g(z) */
+            c->gd[d][l] = (c->dim == 2 && d == 1) ? 0.0 : g_dd(t);
         }
     }
 
@@ -474,15 +493,15 @@ int main(int argc, char **argv)
     MPI_Allreduce(MPI_IN_PLACE, &nlm, 1, MPI_LONG_LONG, MPI_MAX, c->cart);
     MPI_Allreduce(MPI_IN_PLACE, &msgs, 1, MPI_INT, MPI_MAX, c->cart);
     if (c->rank == 0) {
-        const double npts = (double)N * N * N;
+        const double npts = (double)N * c->Nj * N;
         if (!quiet)
-            fprintf(stderr, "[cg_gpu] alg=%s P=%d devices/node=%d N=%d iters=%ld conv=%d relres=%.3e true_relres=%.3e "
+            fprintf(stderr, "[cg_gpu] problem=%dD alg=%s P=%d devices/node=%d N=%d iters=%ld conv=%d relres=%.3e true_relres=%.3e "
                             "err_max=%.3e t_solve=%.3fs t_iter=%.3fms (spmv %.3f halo %.3f reduce %.3f vec %.3f)\n",
-                    cg1 ? "cg1" : "cg", c->size, c->ndev, N, it, converged, sqrt(rr) / bnorm, tr, em, t_solve,
+                    c->dim, cg1 ? "cg1" : "cg", c->size, c->ndev, N, it, converged, sqrt(rr) / bnorm, tr, em, t_solve,
                     it ? 1e3 * t_loop / it : 0.0, tm[0], tm[1], tm[2], tm[3]);
-        printf("CSV,gpu,%s,staged,3D,%d,%d,%d,%d,%d,%d,%d,%d,%lld,%.1f,%ld,%d,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
+        printf("CSV,gpu,%s,staged,%dD,%d,%d,%d,%d,%d,%d,%d,%d,%lld,%.1f,%ld,%d,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
                "%.6e,%.6e,%.6e,%.6e,%lld,%lld,%d,%.3f\n",
-               cg1 ? "cg1" : "cg", c->size, c->ndev > 0 ? 1 : 0, dims[0], dims[1], dims[2], N, N, N, nlm,
+               cg1 ? "cg1" : "cg", c->dim, c->size, c->ndev > 0 ? 1 : 0, dims[0], dims[1], dims[2], N, c->Nj, N, nlm,
                npts / c->size, it, converged, t_setup, t_solve, it ? t_loop / it : 0.0, tm[0], tm[1], tm[2], tm[3],
                sqrt(rr) / bnorm, tr, em, el, hb[0], hb[1], msgs, t_loop > 0 ? npts * it / t_loop / 1e6 : 0.0);
         fflush(stdout);

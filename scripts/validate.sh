@@ -9,7 +9,8 @@
 #    with the serial solution (solutions are written with MPI-IO and compared in Python);
 # 2. iteration counts / residuals are compared with the serial run;
 # 3. grid-convergence study: the discretisation error must decrease as O(h^2) in serial
-#    and in parallel.
+#    and in parallel;
+# 4. the same three checks for the 2D problem (-D 2: 5-point stencil, files *2d.csv).
 # Results go to results/validation/*.csv; scripts/check_validation.py turns them into PASS/FAIL.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -77,6 +78,41 @@ for N in $NCONV; do
     OMP_NUM_THREADS=1 "$BIN/cg_serial" -n $N -t 1e-10 -q | csv >> "$OUT/convergence.csv"
     OMP_NUM_THREADS=1 $MPIRUN $MPIFLAGS -np 4 "$BIN/cg_mpi" -n $N -t 1e-10 -a cg -c overlap -d 3 -q | csv >> "$OUT/convergence.csv"
     OMP_NUM_THREADS=1 $MPIRUN $MPIFLAGS -np 4 "$BIN/cg_mpi" -n $N -t 1e-10 -a pipecg -c overlap -d 3 -q | csv >> "$OUT/convergence.csv"
+done
+
+# ---------------------------------------------------------------- 2D problem (5-point stencil)
+NV2=100   # 100 is not divisible by 3 -> uneven subdomains
+if [[ $MODE == quick ]]; then DS2="1 2"; NCONV2="32 64 128"; EDGES2="12:8:1 7:6:2"
+else DS2="1 2"; NCONV2="32 48 64 96 128 192 256"; EDGES2="12:8:1 12:8:2 7:6:2 9:5:2 2:2:1"; fi
+echo "$HDR" > "$OUT/serial_ref2d.csv"
+OMP_NUM_THREADS=1 "$BIN/cg_serial" -D 2 -n $NV2 -q -o "$TMP/serial2d.bin" | csv >> "$OUT/serial_ref2d.csv"
+echo "$HDR,maxdiff_vs_serial" > "$OUT/variants2d.csv"
+n=0
+for P in $PS; do for T in $TS; do
+    [[ $T -gt 1 && $P -gt 4 ]] && continue
+    for d in $DS2; do for a in $ALGS; do for c in $COMMS; do
+        line=$(OMP_NUM_THREADS=$T $MPIRUN $MPIFLAGS -np $P "$BIN/cg_mpi" -D 2 -n $NV2 -a $a -c $c -d $d -q -o "$TMP/p.bin" | csv)
+        diff=$(python3 scripts/compare_bin.py "$TMP/p.bin" "$TMP/serial2d.bin")
+        echo "$line,$diff" >> "$OUT/variants2d.csv"
+        n=$((n+1))
+    done; done; done
+done; done
+echo "2D variants: $n runs"
+echo "$HDR,maxdiff_vs_serial" > "$OUT/edge2d.csv"
+for e in $EDGES2; do
+    IFS=: read -r N P d <<< "$e"
+    OMP_NUM_THREADS=1 "$BIN/cg_serial" -D 2 -n $N -q -o "$TMP/sref.bin" > /dev/null
+    for a in $ALGS; do for c in $COMMS; do
+        line=$(OMP_NUM_THREADS=1 $MPIRUN $MPIFLAGS -np $P "$BIN/cg_mpi" -D 2 -n $N -a $a -c $c -d $d -q -o "$TMP/p.bin" | csv)
+        diff=$(python3 scripts/compare_bin.py "$TMP/p.bin" "$TMP/sref.bin")
+        echo "$line,$diff" >> "$OUT/edge2d.csv"
+    done; done
+done
+echo "$HDR" > "$OUT/convergence2d.csv"
+for N in $NCONV2; do
+    OMP_NUM_THREADS=1 "$BIN/cg_serial" -D 2 -n $N -t 1e-10 -q | csv >> "$OUT/convergence2d.csv"
+    OMP_NUM_THREADS=1 $MPIRUN $MPIFLAGS -np 4 "$BIN/cg_mpi" -D 2 -n $N -t 1e-10 -a cg -c overlap -d 2 -q | csv >> "$OUT/convergence2d.csv"
+    OMP_NUM_THREADS=1 $MPIRUN $MPIFLAGS -np 4 "$BIN/cg_mpi" -D 2 -n $N -t 1e-10 -a pipecg -c overlap -d 2 -q | csv >> "$OUT/convergence2d.csv"
 done
 
 # ---------------------------------------------------------------- residual histories

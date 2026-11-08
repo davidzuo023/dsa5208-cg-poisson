@@ -1,7 +1,7 @@
 /*
  * common.h -- problem definition shared by the serial and the MPI+OpenMP solver.
  *
- * We solve the 3D Poisson problem      -Laplace(u) = f   on (0,1)^3,  u = 0 on the boundary,
+ * We solve the Poisson problem  -Laplace(u) = f  on (0,1)^3 (or (0,1)^2 with -D 2), u = 0 on the boundary,
  * discretised with the standard second-order 7-point finite-difference stencil on a uniform
  * grid with N interior points per direction (h = 1/(N+1)).  After multiplying by h^2 the
  * linear system is

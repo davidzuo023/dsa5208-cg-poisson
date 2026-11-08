@@ -12,7 +12,8 @@
 #   PLIST         MPI process counts   [powers of 2 below a node, half node, whole nodes]
 #   VARIANT_PMIN  smallest P for the decomposition/halo/algorithm variants        [2]
 #   EXPERIMENTS   subset of: stream serial strong variants hybrid weak solve sizes
-#                 strong2 (sizes = serial code on SIZES, fixed iterations and full solves;
+#                 strong2 strong2d weak2d sizes2d solve2d (2D problem: NS2D, NW2D, SIZES2D, SOLVE2D_MAX)
+#                 (sizes = serial code on SIZES, fixed iterations and full solves;
 #                 strong2 = strong scaling of NS2^3 from one node up)  [all but sizes, strong2]
 #   SIZES         grids for the serial problem-size study           [64 96 128 192 256 384 512]
 #   MPI_FLAVOR    openmpi | intelmpi | mpich                          [auto-detected]
@@ -192,6 +193,18 @@ for rep in $(seq 1 "$REPS"); do
         if has weak; then
             record weak "$rep" launch "$P" 1 -L "$NW" -t 0 -m "$ITERS" -a cg -c overlap -d 3 -q
         fi
+        # 2D problem (5-point stencil): strong scaling of NS2D^2, slabs vs 2D blocks, weak scaling
+        if has strong2d; then
+            record strong2d "$rep" launch "$P" 1 -D 2 -n "${NS2D:-8192}" -t 0 -m "$ITERS" -a cg -c overlap -d 2 -q
+            if (( P >= VARIANT_PMIN )); then
+                record decomp2d "$rep" launch "$P" 1 -D 2 -n "${NS2D:-8192}" -t 0 -m "$ITERS" -a cg -c overlap -d 1 -q
+                record comm2d "$rep" launch "$P" 1 -D 2 -n "${NS2D:-8192}" -t 0 -m "$ITERS" -a cg -c blocking -d 2 -q
+                record alg2d "$rep" launch "$P" 1 -D 2 -n "${NS2D:-8192}" -t 0 -m "$ITERS" -a cg1 -c overlap -d 2 -q
+            fi
+        fi
+        if has weak2d; then
+            record weak2d "$rep" launch "$P" 1 -D 2 -L "${NW2D:-2048}" -t 0 -m "$ITERS" -a cg -c overlap -d 2 -q
+        fi
     done
     # hybrid: all cores of the job, ranks x threads, threads never span nodes
     if has hybrid; then
@@ -202,6 +215,23 @@ for rep in $(seq 1 "$REPS"); do
         done
     fi
 done
+
+# serial problem-size study of the 2D problem: N^2 unknowns, 5N^2-4N nonzeros
+if has sizes2d; then
+    for N in ${SIZES2D:-256 512 1024 2048 4096 8192}; do
+        for rep in $(seq 1 "$REPS"); do
+            record sizes2d_iter "$rep" "$BIN/cg_serial" -D 2 -n "$N" -t 0 -m "$ITERS" -q
+        done
+        (( N <= ${SOLVE2D_MAX:-4096} )) && record sizes2d_solve 1 "$BIN/cg_serial" -D 2 -n "$N" -t 1e-8 -q
+    done
+fi
+
+# 2D time to solution on all cores
+if has solve2d; then
+    for a in cg cg1; do
+        record solve2d 1 launch "$CORES" 1 -D 2 -n "${NS2D:-8192}" -t 1e-8 -a $a -c overlap -d 2 -q
+    done
+fi
 
 # time to solution (tol = 1e-8) of the three CG variants on all cores
 if has solve; then

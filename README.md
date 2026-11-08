@@ -1,10 +1,11 @@
-# Conjugate Gradients for the 3D Poisson equation with MPI, OpenMP and GPU offload
+# Conjugate Gradients for the 2D and 3D Poisson equation with MPI, OpenMP and GPU offload
 
 DSA5208 project. A matrix-free Conjugate Gradient (CG) solver for
 
-    -Δu = f  on (0,1)^3,  u = 0 on the boundary,
+    -Δu = f  on (0,1)^d (d = 2 or 3),  u = 0 on the boundary,
 
-discretised with the 7-point finite-difference stencil on an N³ grid. The project has a serial
+discretised with the 5-point stencil on an N² grid or the 7-point stencil on an N³ grid
+(`-D 2|3`, all three codes). The project has a serial
 reference code, a hybrid MPI+OpenMP code in which every parallelisation decision can be switched
 at run time, and an MPI + OpenMP target-offload code for GPUs (one GPU per MPI rank):
 
@@ -124,11 +125,12 @@ mpirun -np 8 ./bin/cg_mpi -L 128 -t 0 -m 50
 All options (`./bin/cg_mpi -h`):
 
 ```
--n N        global interior grid N^3 (strong scaling)            [128]
+-D DIM      problem dimension: 2 (N^2 grid, 5-point) | 3 (N^3 grid, 7-point) [3]
+-n N        global interior grid N^DIM (strong scaling)          [128]
 -L n        ~n^3 points per rank: global N = round(n*P^(1/3)) (weak scaling)
 -a ALG      cg | cg1 | pipecg                                    [cg]
 -c COMM     blocking | overlap                                   [overlap]
--d D        decomposition dimensionality 1 | 2 | 3               [3]
+-d D        decomposition dimensionality 1 | 2 | 3 (at most DIM)  [DIM]
 -t TOL      relative residual tolerance (0 = run maxit iterations) [1e-8]
 -m MAXIT    maximum iterations                                   [50N+100]
 -k CHUNKS   interior chunks between MPI progress polls           [4]

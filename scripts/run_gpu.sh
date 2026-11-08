@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GPU benchmarks for bin/cg_gpu (MPI + OpenMP target offload, one GPU per MPI rank).
 #   MACHINE=vanda_gpu bash scripts/run_gpu.sh
-# Knobs: ONLY=validate (stop after step 1), VAL_P (rank counts for step 1), MACHINE, NGPU (GPUs of the job; default from CUDA_VISIBLE_DEVICES / nvidia-smi, capped
+# Knobs: GPU_2D=1 (2D problem instead of steps 2-4), ONLY=validate (stop after step 1), VAL_P (rank counts for step 1), MACHINE, NGPU (GPUs of the job; default from CUDA_VISIBLE_DEVICES / nvidia-smi, capped
 #        by the devices the OpenMP runtime sees), GPU_SIZES, GSOLVE_N (512), GSTRONG_N (512),
 #        GWEAK_L (384), ITERS, REPS, MPIRUN, BIN.   Output: results/$MACHINE/gpu.csv
 set -euo pipefail
@@ -74,6 +74,7 @@ echo "validation: $nfail failure(s)" | tee -a "$OUT/validation.txt"
 [[ ${ONLY:-} == validate ]] && { echo "done (validation only) -> $OUT/validation.txt"; exit 0; }
 
 # 2. one GPU, growing problem: time per iteration and effective bandwidth
+[[ ${GPU_2D:-0} == 1 ]] && GPU_SIZES=""          # 2D run: skip the 3D sweep
 for rep in $(seq 1 "$REPS"); do for N in $GPU_SIZES; do for a in cg cg1; do
     record gsize "$rep" $MPIRUN -np 1 "$BIN/cg_gpu" -n "$N" -a $a -t 0 -m "$ITERS" -q
 done; done; done
@@ -84,6 +85,25 @@ if (( NGPU > 1 )); then
         record gstrong "$rep" $MPIRUN -np "$P" --bind-to none "$BIN/cg_gpu" -n "${GSTRONG_N:-512}" -t 0 -m "$ITERS" -q
         record gweak "$rep" $MPIRUN -np "$P" --bind-to none "$BIN/cg_gpu" -L "${GWEAK_L:-384}" -t 0 -m "$ITERS" -q
     done; done
+fi
+
+# 3b. 2D problem on one GPU (GPU_2D=1): size sweep, validation against the serial 2D solution, solve
+if [[ ${GPU_2D:-0} == 1 ]]; then
+    "$BIN/cg_serial" -D 2 -n 100 -q -o /tmp/ser2d.$$.bin > /dev/null
+    for P in 1 2 4; do for a in cg cg1; do
+        rm -f /tmp/gpu2d.$$.bin
+        l=$($MPIRUN --oversubscribe --bind-to none -np "$P" "$BIN/cg_gpu" -D 2 -n 100 -a $a -q -o /tmp/gpu2d.$$.bin | csv) || true
+        d=nan; [[ -f /tmp/gpu2d.$$.bin ]] && d=$(python3 scripts/compare_bin.py /tmp/gpu2d.$$.bin /tmp/ser2d.$$.bin 2>/dev/null || echo nan)
+        ok=$(python3 -c "import sys; d=float(sys.argv[1]); print('PASS' if d == d and d < 1e-10 else 'FAIL')" "$d" 2>/dev/null || echo FAIL)
+        [[ -n $l ]] && echo "validate2d,1,$l" >> "$CSV"
+        echo "  $ok  2D max|x_gpu-x_ser|/max|x_ser| = $d  (P=$P, $a)" | tee -a "$OUT/validation.txt"
+    done; done
+    rm -f /tmp/ser2d.$$.bin /tmp/gpu2d.$$.bin
+    for rep in $(seq 1 "$REPS"); do for N in ${GPU_SIZES2D:-1024 2048 4096 8192 12288 16384}; do
+        record gsize2d "$rep" $MPIRUN -np 1 "$BIN/cg_gpu" -D 2 -n "$N" -t 0 -m "$ITERS" -q
+    done; done
+    record gsolve2d 1 $MPIRUN -np 1 "$BIN/cg_gpu" -D 2 -n "${GSOLVE2D_N:-8192}" -t 1e-8 -q
+    echo "done (2D) -> $CSV"; exit 0
 fi
 
 # 4. complete solve on one GPU, same problem as the CPU time-to-solution table

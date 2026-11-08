@@ -1,5 +1,9 @@
 /*
- * cg_mpi.c -- hybrid MPI + OpenMP Conjugate Gradient solver for the 3D Poisson problem.
+ * cg_mpi.c -- hybrid MPI + OpenMP Conjugate Gradient solver for the 2D and 3D Poisson problem.
+ *
+ *   -D 2|3         problem dimension: 5-point stencil on an N x N grid or 7-point stencil on
+ *                  N x N x N. The 2D grid is stored as N x 1 x N (i and contiguous k), so every
+ *                  kernel, the halo exchange and the decomposition are shared by both problems.
  *
  * Parallelisation choices that can be switched at run time (see usage()):
  *
@@ -16,7 +20,7 @@
  *   OMP_NUM_THREADS  OpenMP threads per MPI rank (MPI_THREAD_FUNNELED, all MPI calls are
  *                  made by the master thread outside parallel regions)
  *
- * Usage: mpirun -np P ./cg_mpi [-n N | -L nloc] [-a alg] [-c comm] [-d dim]
+ * Usage: mpirun -np P ./cg_mpi [-D 2|3] [-n N | -L nloc] [-a alg] [-c comm] [-d dim]
  *                              [-t tol] [-m maxit] [-k chunks] [-o dump.bin] [-q] [-H]
  */
 #define _POSIX_C_SOURCE 200809L
@@ -42,6 +46,7 @@ typedef struct {
     int nbr[3][2];   /* neighbours [dim][0=low,1=high] (or PROC_NULL) */
     MPI_Comm cart;
     int rank, size, nthreads;
+    int dim;         /* problem dimension: 3 (7-point) or 2 (5-point, N[1] = 1)    */
     size_t sI, sJ, ntot; /* strides: idx = i*sI + j*sJ + k, k contiguous */
     /* halo buffers */
     size_t fsz[3];
@@ -211,6 +216,23 @@ static double stencil_box(Ctx *c, const double *restrict x, double *restrict y,
     if (i1 < i0 || j1 < j0 || k1 < k0) return 0.0;
     const size_t sI = c->sI, sJ = c->sJ;
     double dot = 0.0;
+    if (c->dim == 2) { /* 5-point stencil in the (i,k) plane; the j "direction" has one layer */
+#pragma omp parallel for schedule(static) reduction(+ : dot)
+        for (int i = i0; i <= i1; i++) {
+            const size_t b = (size_t)i * sI + sJ;
+            const double *restrict xc = x + b;
+            double *restrict yc = y + b;
+            double dl = 0.0;
+#pragma omp simd reduction(+ : dl)
+            for (int k = k0; k <= k1; k++) {
+                const double v = 4.0 * xc[k] - xc[k - sI] - xc[k + sI] - xc[k - 1] - xc[k + 1];
+                yc[k] = v;
+                dl += xc[k] * v;
+            }
+            dot += dl;
+        }
+        return dot;
+    }
 #pragma omp parallel for collapse(2) schedule(static) reduction(+ : dot)
     for (int i = i0; i <= i1; i++)
         for (int j = j0; j <= j1; j++) {
@@ -489,7 +511,7 @@ static void verify(Ctx *c, double *x, double *Ax, double *true_relres, double *e
     MPI_Allreduce(MPI_IN_PLACE, &emax, 1, MPI_DOUBLE, MPI_MAX, c->cart);
     *true_relres = sqrt(sums[0]) / c->bnorm;
     *err_max = emax;
-    *err_l2 = sqrt(sums[1] * c->h * c->h * c->h);
+    *err_l2 = sqrt(sums[1] * pow(c->h, c->dim));
 }
 
 /* residual history: recursive residual (free) and true residual (one extra, untimed spmv) */
@@ -654,11 +676,12 @@ static void usage(const char *prog)
 {
     fprintf(stderr,
             "usage: mpirun -np P %s [options]\n"
-            "  -n N        global interior grid N^3 (strong scaling)            [128]\n"
-            "  -L n        ~n^3 points per rank: global N = round(n*P^(1/3)) (weak scaling)\n"
+            "  -D DIM      problem dimension 2 (N^2 grid, 5-point) | 3 (N^3, 7-point) [3]\n"
+            "  -n N        global interior grid N^DIM (strong scaling)          [128]\n"
+            "  -L n        ~n^DIM points per rank: N = round(n*P^(1/DIM)) (weak scaling)\n"
             "  -a ALG      cg | cg1 | pipecg                                    [cg]\n"
             "  -c COMM     blocking | overlap                                   [overlap]\n"
-            "  -d D        decomposition dimensionality 1 | 2 | 3               [3]\n"
+            "  -d D        decomposition dimensionality 1 | 2 | 3 (at most DIM)  [DIM]\n"
             "  -t TOL      relative residual tolerance (0 = run maxit iterations) [1e-8]\n"
             "  -m MAXIT    maximum iterations                                   [50N+100]\n"
             "  -k CHUNKS   interior chunks between MPI progress polls           [4]\n"
@@ -681,7 +704,8 @@ int main(int argc, char **argv)
     MPI_Comm_size(MPI_COMM_WORLD, &c->size);
     if (provided < MPI_THREAD_FUNNELED) die(c, "MPI library does not provide MPI_THREAD_FUNNELED");
 
-    int Nglob = 128, Lloc = 0, decomp = 3, quiet = 0, opt;
+    int Nglob = 128, Lloc = 0, decomp = 0, quiet = 0, opt;
+    c->dim = 3;
     double tol = 1e-8;
     long maxit = -1;
     const char *dump = NULL, *histfile = NULL;
@@ -689,8 +713,9 @@ int main(int argc, char **argv)
     c->comm_mode = COMM_OVERLAP;
     c->nchunks = 4;
     int alg = ALG_CG;
-    while ((opt = getopt(argc, argv, "n:L:a:c:d:t:m:k:o:r:e:qHh")) != -1) {
+    while ((opt = getopt(argc, argv, "D:n:L:a:c:d:t:m:k:o:r:e:qHh")) != -1) {
         switch (opt) {
+        case 'D': c->dim = atoi(optarg); break;
         case 'n': Nglob = atoi(optarg); break;
         case 'L': Lloc = atoi(optarg); break;
         case 'a':
@@ -722,7 +747,9 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    if (decomp < 1 || decomp > 3) die(c, "-d must be 1, 2 or 3");
+    if (c->dim != 2 && c->dim != 3) die(c, "-D must be 2 or 3");
+    if (decomp == 0 || decomp > c->dim) decomp = c->dim;   /* default: as many as the problem has */
+    if (decomp < 1) die(c, "-d must be 1, 2 or 3");
     c->nthreads = omp_get_max_threads();
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -731,17 +758,18 @@ int main(int argc, char **argv)
     /* ---------------- process grid ---------------- */
     int dims[3] = {0, 0, 0};
     if (decomp == 1) { dims[0] = c->size; dims[1] = 1; dims[2] = 1; }
+    else if (c->dim == 2) dims[1] = 1;                     /* 2D problem: split i and k   */
     else if (decomp == 2) dims[2] = 1;
     MPI_Dims_create(c->size, 3, dims);
     int periods[3] = {0, 0, 0};
     MPI_Cart_create(MPI_COMM_WORLD, 3, dims, periods, 1, &c->cart);
     MPI_Comm_rank(c->cart, &c->rank);
     MPI_Cart_coords(c->cart, c->rank, 3, c->coords);
-    /* weak scaling: keep ~Lloc^3 points per rank on a cubic global grid */
-    if (Lloc > 0) Nglob = (int)lround(Lloc * cbrt((double)c->size));
+    /* weak scaling: keep ~Lloc^DIM points per rank on a square / cubic global grid */
+    if (Lloc > 0) Nglob = (int)lround(Lloc * (c->dim == 3 ? cbrt((double)c->size) : sqrt((double)c->size)));
     for (int d = 0; d < 3; d++) {
         c->dims[d] = dims[d];
-        c->N[d] = Nglob;
+        c->N[d] = (c->dim == 2 && d == 1) ? 1 : Nglob;
         const int q = c->N[d] / dims[d], rem = c->N[d] % dims[d];
         c->n[d] = q + (c->coords[d] < rem ? 1 : 0);
         c->off[d] = c->coords[d] * q + (c->coords[d] < rem ? c->coords[d] : rem);
@@ -774,8 +802,9 @@ int main(int argc, char **argv)
         c->gd[d] = malloc((size_t)(c->n[d] + 2) * sizeof(double));
         for (int l = 0; l <= c->n[d] + 1; l++) {
             const double t = (c->off[d] + l) * c->h; /* local l=1 is global index off+1 */
-            c->g[d][l] = g_fun(t);
-            c->gd[d][l] = g_dd(t);
+            /* 2D: the j factor of u = g(x)g(y)g(z) is 1, so u = g(x)g(z), f = -(g''g + g g'') */
+            c->g[d][l] = (c->dim == 2 && d == 1) ? 1.0 : g_fun(t);
+            c->gd[d][l] = (c->dim == 2 && d == 1) ? 0.0 : g_dd(t);
         }
     }
 
@@ -842,10 +871,10 @@ int main(int argc, char **argv)
         const double npts = (double)c->N[0] * c->N[1] * c->N[2];
         if (!quiet)
             fprintf(stderr,
-                    "[cg_mpi] alg=%s comm=%s decomp=%dD P=%d T=%d grid=%dx%dx%d N=%d iters=%ld conv=%d "
+                    "[cg_mpi] problem=%dD alg=%s comm=%s decomp=%dD P=%d T=%d grid=%dx%dx%d N=%d iters=%ld conv=%d "
                     "relres=%.3e true_relres=%.3e err_max=%.3e t_solve=%.3fs t_iter=%.3fms "
                     "(spmv %.3f halo %.3f reduce %.3f vec %.3f)\n",
-                    alg_name[alg], comm_name[c->comm_mode], decomp, c->size, c->nthreads, c->dims[0],
+                    c->dim, alg_name[alg], comm_name[c->comm_mode], decomp, c->size, c->nthreads, c->dims[0],
                     c->dims[1], c->dims[2], c->N[0], it, converged, sqrt(rr) / bnorm, true_relres, emax,
                     t_solve, it ? 1e3 * t_loop / it : 0.0, tm[0], tm[1], tm[2], tm[3]);
         printf("CSV,mpi,%s,%s,%dD,%d,%d,%d,%d,%d,%d,%d,%d,%lld,%.1f,%ld,%d,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
