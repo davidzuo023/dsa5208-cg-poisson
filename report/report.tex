@@ -483,7 +483,7 @@ unknowns) in 3D and $N=\TwoN$ (\TwoDofs{} million unknowns) in 2D; weak-scaling 
 $\WeakLocal^3$ and $\TwoWeakLocal^2$ points per process. Each timing run performs exactly \Iters{} iterations of the steady-state
 loop; work vectors are allocated before the clock starts, and the one-off setup stencil application of CG1
 and pipelined CG counts in the time to solution but not in the time per iteration. Every configuration ran
-\Reps{} times, interleaved with the others, and we report the fastest run (median spread
+\Reps{} times, interleaved with the others (the complete solves of \cref{sec:solve} once), and we report the fastest run (median spread
 \MedSpread\% in 3D, 3.3\% in 2D); the $256\times1$ split of \cref{sec:hybrid} is the same configuration as strong scaling at
 $P=256$, and the two sets of runs are pooled. The GPU runs used one \GpuName{} (48\,GB, driver \GpuDriver) on a Vanda GPU node,
 compiled with \code{nvc} \GpuNVC{} of the NVIDIA HPC SDK (\code{-O3 -mp=gpu -gpu=cc86}).
@@ -517,7 +517,7 @@ the ideal law and the cache effects at the small end, and reaches \SzTwoSolveMax
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{sizes}
-\caption{Serial solver on one core of a \SizesCPU{} node, 3D and 2D problem. (a) Time per iteration
+\caption{Serial solver on one core of an \SizesCPU{} node, 3D and 2D problem. (a) Time per iteration
 against the matrix dimension; (b) iterations to $\varepsilon=10^{-8}$; (c) time to solution against the
 matrix dimension. Dashed lines: cost proportional to the number of unknowns and iterations proportional to
 $N$.}\label{fig:sizes}

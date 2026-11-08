@@ -97,7 +97,7 @@ def plain_log(ax, axis="y", lo=-3, hi=5):
 
 
 def tex_escape(s):
-    return str(s).replace("_", r"\_").replace("%", r"\%").replace("&", r"\&").replace("#", r"\#")
+    return str(s).replace("(R)", "").replace("(TM)", "").replace("_", r"\_").replace("%", r"\%").replace("&", r"\&").replace("#", r"\#")
 
 
 def fmt(x, nd=2):
