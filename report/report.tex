@@ -46,7 +46,7 @@
 \begin{center}
 {\LARGE\bfseries Scaling Conjugate Gradients with MPI and OpenMP\par}
 \vspace{4pt}
-{\large Decomposition, communication hiding, memory bandwidth and GPU offload in a matrix-free 3D Poisson solver\par}
+{\large Decomposition, communication hiding, memory bandwidth and GPU offload in matrix-free 2D and 3D Poisson solvers\par}
 \vspace{10pt}
 \begin{tabular*}{\linewidth}{@{\extracolsep{\fill}}ccc}
 WU YUHAN (A0351706H) & ZUO DEWEI (A0352507H) & ZHU CHEN (A0357394N)
@@ -61,7 +61,7 @@ DSA5208 $\cdot$ Project 3\par
 The Conjugate Gradient (CG) method is the standard solver for the symmetric positive definite systems
 produced by elliptic partial differential equations, and it is hard to scale: every iteration
 needs a nearest-neighbour exchange, two global reductions and a full sweep through memory. We build a
-matrix-free CG solver for the 3D Poisson equation in three versions---serial, hybrid MPI\,+\,OpenMP, and
+matrix-free CG solver for the 2D and 3D Poisson equation in three versions---serial, hybrid MPI\,+\,OpenMP, and
 MPI\,+\,OpenMP target offload to GPUs---in which domain decomposition, halo exchange, reduction strategy and
 the split between processes and threads are run-time switches, and measure each choice on the NUS Vanda
 cluster from one core to \Pmax{} cores on \NodesMax{} nodes and on an NVIDIA A40. In \ValRuns{} CPU and
@@ -74,7 +74,11 @@ brings its own memory, and \Pmax{} cores run a $512^3$ iteration in \TiterPmax\,
 \WeakNodeEff\% weak-scaling efficiency on 1.8 billion unknowns. At that scale the global reductions, not the
 halo messages, cost most: they take \RedFracPmax\% of an iteration against \HaloFracPmax\% for the halo
 exchange, almost all of it waiting at a barrier. Neither merging the two reductions nor pipelining them
-removes that wait. One A40 runs an iteration \GpuVsSocket{} times faster than a 32-core CPU socket.
+removes that wait. The 2D problem confirms both mechanisms and reverses one design choice: its halo is a
+\TwoHaloKiBMax\,KiB trickle, \Pmax{} cores reach \TwoNodeEffMax\% strong and \TwoWeakNodeEff\% weak
+efficiency relative to one node, and slabs, which lose a factor \RelOneD{} in 3D, are \TwoSlabPct\%
+faster than blocks in 2D. One A40 runs an iteration \GpuVsSocket{} (3D) and \GpuTwoVsSocket{} (2D) times
+faster than a 32-core CPU socket.
 
 \section{Introduction}\label{sec:intro}
 
@@ -115,7 +119,11 @@ CPU socket, but every value that crosses the PCIe bus to reach the network costs
 host.
 
 This project implements a serial reference solver, a hybrid MPI\,+\,OpenMP solver and an MPI\,+\,OpenMP
-offload solver in C, with each design choice a run-time switch so that its effect is measured in isolation
+offload solver in C for the Poisson problem in two and in three dimensions. The two problems share the
+algorithm and the code but not the balance between computation and communication: a 2D subdomain has a
+perimeter where a 3D subdomain has a surface, so the same number of processes exchanges far less data in
+2D, and the comparison separates what is a property of CG from what is a property of the geometry. Each
+design choice is a run-time switch so that its effect is measured in isolation
 on an identical problem. We validate the parallel solvers point by point against the serial one and against
 an analytical solution, derive a performance model from memory traffic and communication volume, and
 instrument the solvers with per-phase timers and byte counters that explain the measured scaling rather
@@ -129,32 +137,42 @@ GPU.
 
 \section{The model problem and the Conjugate Gradient method}\label{sec:algorithm}
 
-We solve the Poisson equation $-\nabla^2 u = f$ on the unit cube $\Omega=(0,1)^3$ for an unknown
-function $u:\Omega\to\mathbb{R}$ and a given source $f$, with the homogeneous Dirichlet condition $u=0$ on
-the boundary $\partial\Omega$. A uniform grid with $N$ interior points per direction has spacing
-$h=1/(N+1)$ and grid points $(x_i,y_j,z_k)=(ih,jh,kh)$ for $i,j,k\in\{1,\dots,N\}$; we write $u_{ijk}$ for
-the approximation of $u(x_i,y_j,z_k)$. Replacing each second derivative by the centred difference
-$(u_{i-1}-2u_i+u_{i+1})/h^2$ and multiplying by $h^2$ gives the linear system $A\vb u=\vb b$ with
+We solve the Poisson equation $-\nabla^2 u = f$ on the unit square or cube $\Omega=(0,1)^d$, $d\in\{2,3\}$,
+for an unknown function $u:\Omega\to\mathbb{R}$ and a given source $f$, with the homogeneous Dirichlet
+condition $u=0$ on the boundary $\partial\Omega$. A uniform grid with $N$ interior points per direction has
+spacing $h=1/(N+1)$ and grid points $(x_i,y_j,z_k)=(ih,jh,kh)$ for $i,j,k\in\{1,\dots,N\}$; we write
+$u_{ijk}$ for the approximation of $u(x_i,y_j,z_k)$, and drop the index $j$ in 2D. Replacing each second
+derivative by the centred difference $(u_{i-1}-2u_i+u_{i+1})/h^2$ and multiplying by $h^2$ gives the linear
+system $A\vb u=\vb b$ with the 7-point stencil in 3D and the 5-point stencil in 2D,
 \begin{equation}\label{eq:stencil}
 \begin{aligned}
-  (A\vb u)_{ijk} &= 6u_{ijk}-u_{i-1,j,k}-u_{i+1,j,k}-u_{i,j-1,k}-u_{i,j+1,k}-u_{i,j,k-1}-u_{i,j,k+1},\\
-  b_{ijk} &= h^2 f(x_i,y_j,z_k),
+  (A\vb u)_{ijk} &= 6u_{ijk}-u_{i-1,j,k}-u_{i+1,j,k}-u_{i,j-1,k}-u_{i,j+1,k}-u_{i,j,k-1}-u_{i,j,k+1},
+  & b_{ijk} &= h^2 f(x_i,y_j,z_k), \\
+  (A\vb u)_{ik} &= 4u_{ik}-u_{i-1,k}-u_{i+1,k}-u_{i,k-1}-u_{i,k+1},
+  & b_{ik} &= h^2 f(x_i,z_k),
 \end{aligned}
 \end{equation}
 where values with an index equal to $0$ or $N+1$ are boundary values and therefore zero. The matrix
-$A\in\mathbb{R}^{N^3\times N^3}$ is symmetric positive definite, has $7N^3-6N^2$ nonzeros and condition
-number $\kappa(A)\approx 4/(\pi^2h^2)$. We never assemble $A$: it is applied as the 7-point stencil
-\eqref{eq:stencil} (\emph{matrix-free}), so memory consumption and memory traffic are entirely those of
-the vectors.
+$A\in\mathbb{R}^{N^d\times N^d}$ is symmetric positive definite, has $7N^3-6N^2$ nonzeros in 3D and
+$5N^2-4N$ in 2D, and in both cases condition number $\kappa(A)\approx 4/(\pi^2h^2)$. We never assemble
+$A$: it is applied as the stencil \eqref{eq:stencil} (\emph{matrix-free}), so memory consumption and
+memory traffic are entirely those of the vectors.
 
-To test the solver we prescribe the exact solution $u(x,y,z)=g(x)\,g(y)\,g(z)$ with $g(t)=t(1-t)e^{t}$,
-which vanishes on $\partial\Omega$, and compute the matching source $f=-\nabla^2 u$ analytically using
-$g''(t)=-t(3+t)e^t$. The common choice $\sin(\pi x)\sin(\pi y)\sin(\pi z)$ would be useless here: it is
+To test the solver we prescribe the exact solution $u(x,y,z)=g(x)\,g(y)\,g(z)$ in 3D and $u(x,z)=g(x)\,g(z)$
+in 2D, with $g(t)=t(1-t)e^{t}$, which vanishes on $\partial\Omega$, and compute the matching source
+$f=-\nabla^2 u$ analytically using $g''(t)=-t(3+t)e^t$, e.g.\
+$f=-\bigl(g''(x)g(y)g(z)+g(x)g''(y)g(z)+g(x)g(y)g''(z)\bigr)$ in 3D. The common choice $\sin(\pi x)\sin(\pi y)\sin(\pi z)$ would be useless here: it is
 an eigenvector of the discrete operator, CG converges on it in a single iteration, and the test would
 hide most bugs. For our $u$ the discrete solution differs from the exact one by a genuine $O(h^2)$ error,
-which turns the comparison with $u$ into a sharp end-to-end test. The project uses no external data set:
-the input is generated from this manufactured solution, so our conclusions concern the solver and the
-machine rather than a data set.
+which turns the comparison with $u$ into a sharp end-to-end test.
+
+The input data are therefore synthetic, and they are generated inside the solver rather than read from a
+file. Each process tabulates $g$ and $g''$ at the coordinates of its own grid lines, one table per
+direction, and forms its part of $\vb b$ from the products in \eqref{eq:stencil}; the starting vector is
+$\vb x_0=0$. Nothing is random, so every run with the same $N$ solves the identical system whatever $P$ and
+$T$ are, which is what the point-wise comparisons of \cref{sec:validation} rely on, and a weak-scaling run
+only has to enlarge $N$ with $P$ (\cref{sec:perf}). No external data set is involved, so our conclusions
+concern the solver and the machine rather than a data set.
 
 CG~[1,6] (\cref{alg:cg}) builds the iterates $\vb x_k$ from the residuals $\vb r_k=\vb b-A\vb x_k$ and the
 search directions $\vb p_k$; the step length $\alpha_k$ minimises the $A$-norm of the error along
@@ -198,13 +216,18 @@ coordinates; block sizes therefore differ by at most one plane and any $P$ works
 stored with one ghost layer on every side, $(n_x+2)(n_y+2)(n_z+2)$ values with the $k$ index contiguous.
 Ghost layers on the physical boundary permanently hold the Dirichlet zeros, so the stencil loop contains
 no branches. The right-hand side is evaluated from one-dimensional tables of $g$ and $g''$, so no global
-vector $\vb b$ is stored.
+vector $\vb b$ is stored. The 2D problem uses the same structures with $n_y=1$ and $p_y=1$: its grid is
+stored as $N\times1\times N$, every kernel, the halo exchange and the decomposition are shared with the 3D
+code, and only the stencil loop skips the $j$ neighbours.
 
 The switch \code{-d} selects slabs ($p_y=p_z=1$), pencils ($p_z=1$) or blocks (all three factors free).
 The choice sets how much data each process sends per iteration. For a process in the interior of the
 process grid and $N$ divisible by the factors, the number of 8-byte values sent per halo exchange is
 \begin{equation}\label{eq:volume}
-  V_{\text{1D}} = 2N^2,\qquad V_{\text{2D}} = \frac{4N^2}{\sqrt P},\qquad V_{\text{3D}} = \frac{6N^2}{P^{2/3}},
+\begin{aligned}
+  &\text{3D problem:} && V_{\text{1D}} = 2N^2, && V_{\text{2D}} = \frac{4N^2}{\sqrt P}, && V_{\text{3D}} = \frac{6N^2}{P^{2/3}},\\
+  &\text{2D problem:} && V_{\text{1D}} = 2N, && V_{\text{2D}} = \frac{4N}{\sqrt P},
+\end{aligned}
 \end{equation}
 carried by $m=2$, $4$ and $6$ messages respectively. The slab volume does not decrease with $P$, so slabs
 stop scaling once the halo time becomes comparable to the computation, which shrinks like $1/P$; slabs
@@ -213,7 +236,9 @@ by a stride of $n_z+2$, so packing them into a send buffer touches one cache lin
 counts the bytes and messages of every process, and \cref{fig:commvol} shows the measured values for
 $N=\CVN$. At $P=\CVP$ the busiest process sends \CVoneD\,MiB per iteration with slabs and \CVthreeD\,MiB with
 blocks, a factor of \CVratio, while the message count rises from \CVmsgsOneD{} to \CVmsgsThreeD. We use
-blocks as the baseline.
+blocks as the baseline of the 3D problem and 2D blocks as the baseline of the 2D problem. For slabs the
+ratio of halo to owned points is $2P/N$ in both problems, but a 2D grid with as many unknowns as a 3D one
+has a far larger $N$: at $P=256$ the ratio is $6\%$ for $8192^2$ and $100\%$ for $512^3$.
 
 \begin{figure}[t]
 \centering
@@ -238,7 +263,8 @@ waits for the messages, unpacks and finally applies the stencil to the remaining
 is covered by disjoint pieces---two $i$-planes, two $j$-rows inside them, two $k$-columns inside those---so
 the fused inner product counts every point exactly once. Making this overlap effective took two further
 steps. The first concerns progress: most MPI libraries move data only inside MPI calls, and large faces
-use a rendezvous protocol whose handshake cannot complete while the process computes. The solver therefore
+use a rendezvous protocol, in which the data move only after a handshake with the matching receive, and
+that handshake cannot complete while the process computes. The solver therefore
 splits the interior sweep into chunks of $i$-planes (four by default) and calls \code{MPI\_Testall}
 between them, which advances the transfers during the computation. The second concerns locality. Our first
 version deferred the shell layers on all six sides, so with slabs every process handled its $k=1$ and
@@ -287,11 +313,13 @@ MPI is initialised with \code{MPI\_THREAD\_FUNNELED}: only the master thread cal
 parallel regions. Every loop nest is an \code{omp parallel for collapse(2) schedule(static)} over the
 $(i,j)$ index pairs with an \code{omp simd} loop over the contiguous $k$ index, and the fused inner
 products are OpenMP reductions. Arrays are 64-byte aligned and initialised with the same static schedule
-that later computes on them, so on multi-socket nodes the first-touch policy places each thread's pages in
-its own NUMA domain. Processes and threads are pinned (\code{-{}-map-by ppr:$n$:node:PE=$T$
+that later computes on them, so on multi-socket nodes the first-touch policy (Linux places a page in the memory
+of the socket that first writes it) puts each thread's pages in its own NUMA domain, the memory attached to
+its socket. Processes and threads are pinned (\code{-{}-map-by ppr:$n$:node:PE=$T$
 -{}-bind-to core}, \code{OMP\_PLACES=cores}, \code{OMP\_PROC\_BIND=close}), so the threads of one process
 share a socket. Fewer processes with more threads reduce the number of messages, the number of reduction
-participants and the ghost memory; in exchange every kernel pays a fork--join (five parallel regions per
+participants and the ghost memory; in exchange every kernel pays a fork--join, the start and the closing barrier
+of an OpenMP parallel region (five parallel regions per
 iteration with blocking halos, up to about fifteen with overlap), and the worker threads idle while the
 master thread waits in MPI.
 
@@ -319,7 +347,8 @@ where $B_v$ is the memory traffic per grid point of the CG variant (\cref{tab:va
 memory bandwidth available to one process when $P$ processes share the hardware, $m$ and $V$ the message
 count and halo volume of the busiest process from \eqref{eq:volume}, $t_s$ the latency of a message,
 $t_w$ the transfer time per value, and $\rho$ the number of reductions per iteration that are not hidden.
-$B_v$ counts explicit loads and stores in the convention of the STREAM benchmark~[5], assuming that the
+$B_v$ counts explicit loads and stores in the convention of the STREAM benchmark~[5], which measures the
+sustainable memory bandwidth with simple vector kernels, assuming that the
 stencil's neighbour values are reused from cache. For classic CG the stencil reads $\vb p$ and writes $\vb
 q$, the $\vb x,\vb r$ update reads four vectors and writes two, and the $\vb p$ update reads two and writes
 one: $2+6+3=11$ accesses, or 88 bytes. Fusing the two inner products into these sweeps avoids three further
@@ -375,14 +404,20 @@ processes sharing one A40, so that the $P=8$ runs exchange halos in all three di
 packing, host staging and MPI; all \GpuValRuns{} runs need 146 iterations and agree with the serial solution
 to \GpuValWorst.
 
+The 2D problem passes the same tests. \ValTwoRuns{} parallel runs on a $100^2$ grid (100 is not divisible
+by 3, three CG variants, two halo modes, slabs and 2D blocks, $P=1$ to $8$, $T=1,2$) reproduce the serial
+2D solution to \ValTwoWorstCG{} with classic CG and CG1 and to \ValTwoWorstPipe{} with pipelined CG, all
+in the serial \ValTwoIters{} iterations; \ValTwoEdge{} corner cases down to $N=2$ agree to rounding level,
+and the GPU solver agrees to \GpuValTwoWorst{} on $P=\GpuValTwoP$ processes.
+
 \begin{table}[htb]
 \centering\small
-\caption{Parallel against serial solution on the $\ValN^3$ grid. ``max diff'' is
+\caption{Parallel against serial solution on the $\ValN^3$ (3D) and $100^2$ (2D) grids. ``max diff'' is
 $\max|x_{\text{par}}-x_{\text{ser}}|/\max|x_{\text{ser}}|$ over all runs of a row; ``true residual'' is the
 largest $\|\vb b-A\vb x\|/\|\vb b\|$ at tolerance $\varepsilon=10^{-8}$.}\label{tab:validation}
-\begin{tabular}{llrcccrr}
+\begin{tabular}{lllrcccrr}
 \toprule
-algorithm & halo & runs & $P$ & $T$ & iterations & max diff & true residual \\
+problem & algorithm & halo & runs & $P$ & $T$ & iterations & max diff & true residual \\
 \midrule
 \tabinput{generated/tab_validation.tex}
 \bottomrule
@@ -393,7 +428,8 @@ The second level checks that the solver computes the solution of the differentia
 of some linear system. \Cref{tab:convergence} and \cref{fig:validation}(a) report the discrete $L^2$ error
 $\|u_h-u\|_{L^2}=\bigl(h^3\sum_{ijk}(u_{ijk}-u(x_i,y_j,z_k))^2\bigr)^{1/2}$ for $N=16$ to $128$, solved to
 $\varepsilon=10^{-10}$ so that the algebraic error is negligible. The observed order is $\OrderMin$ to $\OrderMax$,
-the order of the 7-point scheme, and the parallel errors match the serial ones in every printed digit.
+the order of the 7-point scheme, and $\OrderTwoMin$ to $\OrderTwoMax$ for the 5-point scheme on
+$N=\ConvTwoNmin$ to $\ConvTwoNmax$ in 2D, and the parallel errors match the serial ones in every printed digit.
 
 \begin{table}[htb]
 \centering\small
@@ -424,8 +460,8 @@ recomputing $\vb r=\vb b-A\vb x$ and $\vb w=A\vb r$ explicitly.
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{validation}
-\caption{(a) Discretisation error against grid spacing for the serial and parallel solvers, with an
-$O(h^2)$ reference line. (b) True (solid) and recursively updated (dotted) relative residuals,
+\caption{(a) Discretisation error against grid spacing for the serial and parallel solvers in 3D and 2D,
+with an $O(h^2)$ reference line. (b) True (solid) and recursively updated (dotted) relative residuals,
 $N=64$, $P=4$; the CG and CG1 curves coincide.}\label{fig:validation}
 \end{figure}
 
@@ -439,11 +475,13 @@ requested \MachineNodes{} chunks of \MachineCPN{} cores on \MachineNodes{} diffe
 PBS assigned the same \MachineCPN{} cores, the odd-numbered cores 9--71, which Linux numbers on the second
 socket of these nodes. Each node thus contributes one socket and its memory controllers, and the job is a
 clean model of a cluster of \MachineCPN-core nodes. MPI processes on remote
-nodes were started through PBS (\code{pbs\_tmrsh}), which keeps them inside the job's CPU set, and every
+nodes were started through PBS (\code{pbs\_tmrsh}), which keeps them inside the job's CPU set (the cores PBS assigned to the job), and every
 process was pinned to its own core. The code was built with GCC \MachineGCC{} (\code{-O3 -march=native
--fopenmp}) and run with \MachineMPI. Strong-scaling runs use $N=\NS$ (\NSdofs{} million unknowns, four to
-seven vectors of 1.07\,GB each) and $N=\NStwo$ (\NStwoDofs{} million unknowns), weak-scaling runs
-$\WeakLocal^3$ points per process. Each timing run performs exactly \Iters{} iterations of the steady-state
+-fopenmp}) and run with \MachineMPI. Strong scaling keeps the global problem fixed while $P$ grows; weak scaling keeps the problem
+per process fixed and enlarges the global grid with $P$. Strong-scaling runs use $N=\NS$ (\NSdofs{}
+million unknowns, four to seven vectors of 1.07\,GB each) and $N=\NStwo$ (\NStwoDofs{} million
+unknowns) in 3D and $N=\TwoN$ (\TwoDofs{} million unknowns) in 2D; weak-scaling runs use
+$\WeakLocal^3$ and $\TwoWeakLocal^2$ points per process. Each timing run performs exactly \Iters{} iterations of the steady-state
 loop; work vectors are allocated before the clock starts, and the one-off setup stencil application of CG1
 and pipelined CG counts in the time to solution but not in the time per iteration. Every configuration ran
 \Reps{} times, interleaved with the others, and we report the fastest run; the $256\times1$ split of
@@ -472,12 +510,22 @@ other jobs ($\SzTiterMax$\,ms per $512^3$ iteration); the serial baseline for al
 measured in a separate 32-core job on the same processor type (\code{pbs/vanda\_node.pbs}), with the other
 cores of the chunk idle, at \SerialTiter\,ms.
 
+The 2D solver covers $N=\SzTwoNmin$ to $\SzTwoNmax$, from 0.07 to \SzTwoDofsMax{} million unknowns and
+from 0.33 to 336 million nonzeros (\cref{tab:sizes2d}). Its cost per grid point shows the cache step that
+the 3D runs did not: at $N=\SzTwoNmin$ the touched part of the four vectors, about 2\,MiB, fits into the core's
+private 2\,MiB L2 cache and an update costs \SzTwoNsSmall\,ns, from $N=\SzTwoNsecond$ to 1024 the data come from
+L3 (\SzTwoNsSecond\,ns), and from 2048 on from DRAM, where the cost settles at \SzTwoNsLarge\,ns, or
+\SzTwoBwLarge\,GB/s against \SzBwLarge\,GB/s in 3D. The iteration count again grows linearly in $N$, $\SzTwoItPerNmin\,N$
+to $\SzTwoItPerNmax\,N$, so the 2D time to solution grows like $N^{\SzTwoSlopeSolve}$, between the $N^3$ of
+the ideal law and the cache effects at the small end, and reaches \SzTwoSolveMax\,s for $N=\SzTwoNsolveMax$.
+
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{sizes}
-\caption{Serial solver on one core of a \SizesCPU{} node. (a) Time per iteration against the matrix
-dimension; (b) iterations to $\varepsilon=10^{-8}$; (c) time to solution. Dashed lines are the expected
-power laws.}\label{fig:sizes}
+\caption{Serial solver on one core of a \SizesCPU{} node, 3D and 2D problem. (a) Time per iteration
+against the matrix dimension; (b) iterations to $\varepsilon=10^{-8}$; (c) time to solution against the
+matrix dimension. Dashed lines: cost proportional to the number of unknowns and iterations proportional to
+$N$.}\label{fig:sizes}
 \end{figure}
 
 \begin{table}[t]
@@ -491,6 +539,20 @@ solution.}\label{tab:sizes}
 $N$ & unknowns & nonzeros & MiB & ms/iter & ns/point & GB/s & iterations & solve (s) & max error \\
 \midrule
 \tabinput{generated/tab_sizes.tex}
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\caption{Serial problem-size study of the 2D problem, columns as in \cref{tab:sizes} (the 2D grid is
+stored with three $j$-planes, so the MiB column is three times the touched data). Complete solves up to
+$N=\SzTwoNsolveMax$.}\label{tab:sizes2d}
+\begin{tabular}{rrrrrrrrrc}
+\toprule
+$N$ & unknowns & nonzeros & MiB & ms/iter & ns/point & GB/s & iterations & solve (s) & max error \\
+\midrule
+\tabinput{generated/tab_sizes2d.tex}
 \bottomrule
 \end{tabular}
 \end{table}
@@ -684,6 +746,66 @@ $P$ & $T$ & best & median & halo & reduce \\
 \end{minipage}
 \end{figure}
 
+\subsection{The 2D problem}\label{sec:twod}
+
+\Cref{fig:twod} and \cref{tab:strong2d} repeat the scaling study for the 2D problem on the same eight
+nodes: $\TwoN^2$ for strong scaling, $\TwoWeakLocal^2$ points per process for weak scaling, 2D blocks,
+overlapped halo and classic CG as the baseline. Inside a socket the 2D solver hits the same bandwidth
+wall: one process needs \TwoPoneT\,ms per iteration, 32 processes \TwoTnode\,ms, a speedup of
+\TwoSpeedNode{} at \TwoBwNode\,GB/s. Across nodes it scales better than the 3D solver. Eight nodes reach
+\TwoTmax\,ms, \TwoNodeSpeedMax{} times faster than one node, \TwoNodeEffMax\% efficiency against
+\NodeEffPmax\% in 3D, and \TwoSpeedMax{} times faster than one process. Both problems end at the same
+aggregate traffic on eight nodes, \TwoBwMax{} and \CGbwAll\,GB/s. The weak-scaling runs show the same
+picture: one node is at \TwoWeakEffNode\% of the single-process rate, and from one to eight nodes the
+time per iteration only grows from \TwoWeakTnode{} to \TwoWeakTmax\,ms while the grid grows to
+$\TwoWeakNmax^2$, \TwoWeakDofsMax{} billion unknowns, a node-level weak-scaling efficiency of
+\TwoWeakNodeEff\% against \WeakNodeEff\% in 3D.
+
+The communication budget explains the difference. A process of the $\TwoN^2$ run on 256 cores owns a
+\TwoLocalMax{} block and sends \TwoHaloKiBMax\,KiB per iteration in \TwoMsgsMax{} messages, twenty times
+less than in 3D, and the halo phase costs \TwoHaloMsMax\,ms, \TwoHaloFracMax\% of the iteration. The
+reductions cost \TwoRedMsMax\,ms, \TwoRedFracMax\% of it: the barrier wait of \cref{sec:comm} is a
+property of CG on a shared machine and appears in both problems, while the halo cost is a property of the
+geometry and nearly vanishes in 2D.
+
+The geometry also reverses the decomposition result. In 2D, slabs are faster than blocks at every process
+count, \TwoSlabMin{} times the baseline on one node and \TwoSlabMax{} on eight. A slab process sends two
+contiguous rows of $\TwoN$ values, \TwoSlabHaloKiB\,KiB per iteration in two messages, which the network
+delivers in microseconds, and in return it saves the strided $k$-faces and the extra messages of the
+blocks and sweeps rows sixteen times longer. The halo-to-owned ratio $2P/N$ of \cref{sec:decomp} stays at a
+few percent in 2D, whereas in 3D the slab halo equals the slab, so the decomposition that has to be avoided
+in 3D is the one to use in 2D. The other two choices behave as in 3D: the blocking halo runs at
+\TwoBlockRange{} times the baseline, and CG1 at \TwoCGoneRange, \TwoCGoneMax{} on eight nodes. The
+complete solve on 256 cores needs \TwoSolveIters{} iterations; it takes \TwoSolveCG\,s with classic CG,
+\TwoSolveSpeedup{} times faster than one process, and \TwoSolveCGone\,s with CG1, a \TwoSolveCGoneGain\%
+gain that the 3D solve does not show.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{twod}
+\caption{The 2D problem on 1 to 256 processes, 32 per node. (a) Strong-scaling speedup over one process,
+$\TwoN^2$ against $512^3$; (b) efficiency relative to one node of strong ($32\,t_{32}/(P\,t_P)$) and weak
+scaling for both problems; (c) time per iteration of slabs, blocking halo and CG1 divided by the 2D
+baseline (2D blocks, overlapped halo, classic CG).}\label{fig:twod}
+\end{figure}
+
+\begin{table}[t]
+\centering\small\setlength{\tabcolsep}{4.5pt}
+\caption{2D strong scaling ($N=\TwoN^2$, \Iters{} iterations) and weak scaling ($\TwoWeakLocal^2$ points
+per process). ``eff'' is relative to one process, ``node eff'' relative to one node; ``comm'' is the share of
+the iteration spent in halo exchange and reductions; ``halo'' is the data sent by the busiest process per
+iteration.}\label{tab:strong2d}
+\begin{tabular}{rrcrrrrrrrr}
+\toprule
+ & & & \multicolumn{6}{c}{strong, $N=\TwoN^2$} & \multicolumn{2}{c}{weak}\\
+\cmidrule(lr){4-9}\cmidrule(lr){10-11}
+$P$ & nodes & process grid & ms/iter & speedup & eff (\%) & node eff (\%) & comm (\%) & halo (KiB) & ms/iter & node eff (\%) \\
+\midrule
+\tabinput{generated/tab_strong2d.tex}
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{GPU offload}\label{sec:gpu}
 
 \Cref{fig:gpu} and \cref{tab:gpu} run the offload solver on one A40 from $N=\GpuNmin$ to $N=\GpuNmax$,
@@ -700,14 +822,20 @@ On the $512^3$ grid one A40 needs \GpuTfiveTwelve\,ms per iteration and moves \G
 is \GpuVsSocket{} times faster than a 32-core CPU socket, \GpuVsCore{} times faster than one core and
 \GpuVsEight{} times slower than the \NodesMax{} nodes of \cref{sec:strong}; the time ratio to the socket is the
 ratio of the bandwidths the two sustain (\GpuBwFiveTwelve{} against \CGbwNode\,GB/s, \GpuBwRatio) times the
-factor $96/88$ the GPU saves by not reading lines before writing them. With several GPUs every halo message passes
+factor $96/88$ the GPU saves by not reading lines before writing them. The 2D problem runs at the same bandwidth: from $\GpuTwoNmin^2$ to
+$\GpuTwoNmax^2$ (\GpuTwoDofsMax{} million unknowns) the A40 sustains \GpuTwoBwMin--\GpuTwoBwMax\,GB/s,
+and the $\GpuTwoN^2$ iteration takes \GpuTwoT\,ms (\GpuTwoBw\,GB/s), \GpuTwoVsSocket{} times faster than
+a CPU socket and \GpuTwoVsEight{} times slower than eight nodes. Its 5-point stencil reaches
+\GpuTwoSpmvBw\,GB/s, more than the 7-point stencil, because it has no neighbours in other planes to fetch
+twice. With several GPUs every halo message passes
 through host memory twice; a CUDA-aware MPI would send the packed faces directly from device memory and
 remove both copies.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{gpu}
-\caption{(a) DRAM bandwidth of the offload solver on one NVIDIA A40 (88 bytes per point and iteration).
+\caption{(a) DRAM bandwidth of the offload solver on one NVIDIA A40 for the 3D and 2D problems (88 bytes
+per point and iteration).
 (b) Time per iteration on the $512^3$ grid: serial code, one 32-core socket, one A40 and eight nodes.}\label{fig:gpu}
 \end{figure}
 
@@ -721,6 +849,9 @@ grid-point updates per second.}\label{tab:gpu}
 $N$ & unknowns & GiB & CG ms/iter & CG1 ms/iter & GB/s & stencil (\%) & GLUP/s \\
 \midrule
 \tabinput{generated/tab_gpu.tex}
+\midrule
+\multicolumn{8}{l}{2D problem ($N^2$ grid; GiB include the two unused ghost planes)} \\
+\tabinput{generated/tab_gpu2d.tex}
 \bottomrule
 \end{tabular}
 \end{table}
@@ -736,16 +867,21 @@ study, on a shared node, took \SolveSerialMeas\,s). \Pmax{} cores on \NodesMax{}
 \SolveGpu\,s. Pipelined CG takes \SolvePipe\,s and is the only
 variant whose answer is worse: its true residual ends at \SolvePipeTrue, \SolvePipeRatio{} times the
 tolerance its recursive residual reports. The residual gap of \cref{sec:validation} grows with the problem
-and is the second cost of hiding the reduction, next to the extra memory traffic.
+and is the second cost of hiding the reduction, next to the extra memory traffic. The 2D solves need
+\TwoSolveIters{} iterations; 256 cores take \TwoSolveCG\,s and one A40 \GpuTwoSolve\,s. Over that many
+iterations even classic CG drifts: its true residual ends at \TwoSolveTrue, while the error against the
+exact solution stays at the discretisation level.
 
 \begin{table}[t]
 \centering\small
-\caption{Complete solves to $\varepsilon=10^{-8}$, $N=\NS^3$ (CPU runs: blocks, overlapped halo, 32
-processes per node). ``speedup'' is relative to the serial baseline rate, $\SolveIters\times\SerialTiter$\,ms
-$=\SolveSerialEst$\,s; the serial solve itself ran on a shared node.}\label{tab:solve}
-\begin{tabular}{llrrrccr}
+\caption{Complete solves to $\varepsilon=10^{-8}$ of the $\NS^3$ and $\TwoN^2$ problems (CPU runs: 3D or 2D
+blocks, overlapped halo, 32 processes per node). ``speedup'' is relative to the serial baseline rate, $\SolveIters\times\SerialTiter$\,ms
+$=\SolveSerialEst$\,s, for 3D (the serial solve itself ran on a shared node) and relative to the
+one-process rate, $\TwoSolveIters\times\TwoPoneT$\,ms $=\TwoSolveSerialEst$\,s, for 2D.}\label{tab:solve}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lllrrrccr}
 \toprule
-platform & algorithm & iterations & time (s) & ms/iter & true residual & max error & speedup \\
+problem & platform & algorithm & iterations & time (s) & ms/iter & true residual & max error & speedup \\
 \midrule
 \tabinput{generated/tab_solve.tex}
 \bottomrule
@@ -754,7 +890,7 @@ platform & algorithm & iterations & time (s) & ms/iter & true residual & max err
 
 \section{Conclusions}\label{sec:conclusion}
 
-We built a matrix-free Conjugate Gradient solver for the 3D Poisson equation in a serial, a hybrid
+We built a matrix-free Conjugate Gradient solver for the 2D and 3D Poisson equation in a serial, a hybrid
 MPI\,+\,OpenMP and an MPI\,+\,OpenMP offload version, in which decomposition, halo exchange, reduction
 strategy and threading are run-time switches. All versions reproduce the serial solution to rounding level
 and converge to the exact solution at the theoretical second order, so every performance difference we
@@ -782,6 +918,11 @@ not pay on this machine. The lever that remains is load balance: anything that m
 its sweep at the same moment shortens every barrier. A few MPI processes per socket with eight OpenMP
 threads each cut the reduction wait and give the fastest split on \HybCores{} cores. One A40 GPU runs an
 iteration \GpuVsSocket{} times faster than a CPU socket and solves the $512^3$ problem in \SolveGpu\,s.
+
+The 2D problem separates the two mechanisms. Its halo nearly disappears, the barrier wait at the
+reductions remains, and eight nodes reach \TwoNodeEffMax\% strong and \TwoWeakNodeEff\% weak efficiency
+relative to one node. It also shows that the right decomposition depends on the geometry: slabs, the
+worst choice in 3D, are the best one in 2D.
 
 The next steps follow from the same analysis: a multigrid or Chebyshev preconditioner, which removes the
 $O(N)$ growth of the iteration count, and communication-avoiding $s$-step methods, which perform one

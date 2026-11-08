@@ -154,78 +154,108 @@ def env_info(d):
 
 
 # ---------------------------------------------------------------- serial problem size
-def fig_sizes(d, macros, tables):
+def load_sizes(d, pre, dim):
     p = os.path.join(d, "bench.csv")
     if not os.path.exists(p):
         return None
     s = pd.read_csv(p)
-    it = s[s.exp == "sizes_iter"].groupby("N0").agg(t=("t_iter", "min"), t_med=("t_iter", "median")).reset_index()
-    so = s[s.exp == "sizes_solve"].groupby("N0").agg(iters=("iters", "max"), ts=("t_solve", "min"),
-                                                     err=("err_max", "min"), tr=("true_relres", "min"),
-                                                     t_long=("t_iter", "min")).reset_index()
+    it = s[s.exp == pre + "_iter"].groupby("N0").agg(t=("t_iter", "min"), t_med=("t_iter", "median")).reset_index()
+    so = s[s.exp == pre + "_solve"].groupby("N0").agg(iters=("iters", "max"), ts=("t_solve", "min"),
+                                                      err=("err_max", "min"), tr=("true_relres", "min"),
+                                                      t_long=("t_iter", "min")).reset_index()
     z = it.merge(so, on="N0", how="left")
     # a 20-iteration run of a small grid lasts milliseconds and catches clock ramp-up and neighbours
     # on the shared node; the complete solve runs the same loop for hundreds of iterations.
     # Time per iteration = the faster of the two.
     z["t"] = z[["t", "t_long"]].min(axis=1)
-    z["n"] = z.N0.astype(float) ** 3
-    z["nnz"] = 7 * z.N0.astype(float) ** 3 - 6 * z.N0.astype(float) ** 2
+    N = z.N0.astype(float)
+    z["n"] = N ** dim
+    z["nnz"] = 7 * N ** 3 - 6 * N ** 2 if dim == 3 else 5 * N ** 2 - 4 * N
     z["nspt"] = 1e9 * z.t / z.n
     z["bw"] = z.n * BYTES_CPU / z.t / 1e9
+    # x, r, p, Ap with ghost layers (the 2D grid is stored as N x 1 x N with three j-planes)
+    z["mib"] = 4 * (N + 2) ** 2 * (N + 2 if dim == 3 else 3) * 8 / 2 ** 20
+    return z
+
+
+def fig_sizes(d3, d2, macros, tables):
+    import numpy as np
+    z3, z2 = load_sizes(d3, "sizes", 3), load_sizes(d2, "sizes2d", 2)
+    if z3 is None:
+        return None, None
     fig, ax = plt.subplots(1, 3, figsize=(6.8, 2.35))
-    ax[0].loglog(z.n / 1e6, 1e3 * z.t, color=C[0], marker="o", label="measured")
-    ref = 1e3 * z.t.iloc[-1] * (z.n / z.n.iloc[-1])
-    ax[0].loglog(z.n / 1e6, ref, color=INK2, ls="--", lw=1.0, label=r"$\propto N^3$")
-    ax[0].set_xlabel("unknowns $N^3$ (millions)")
+    for z, lab, col, mk in [(z3, "3D, 7-point", C[0], "o"), (z2, "2D, 5-point", C[1], "s")]:
+        if z is None:
+            continue
+        ax[0].loglog(z.n / 1e6, 1e3 * z.t, color=col, marker=mk, label=lab)
+        zz = z.dropna(subset=["iters"])
+        ax[1].loglog(zz.N0, zz.iters, color=col, marker=mk, label=lab)
+        ax[2].loglog(zz.n / 1e6, zz.ts, color=col, marker=mk, label=lab)
+    n_all = np.array(sorted(set(z3.n) | (set(z2.n) if z2 is not None else set())))
+    ref = 1e3 * float(z3.t.iloc[-1]) * n_all / float(z3.n.iloc[-1])
+    ax[0].loglog(n_all / 1e6, ref, color=INK2, ls="--", lw=1.0, label="$\\propto$ unknowns")
+    ax[0].set_xlabel("unknowns (millions)")
     ax[0].set_ylabel("ms per iteration")
     ax[0].set_title("(a) Cost of one iteration")
-    plain_log(ax[0], "y")
+    plain_log(ax[0], "y", -2, 4)
     ax[0].xaxis.set_major_locator(FixedLocator([0.1, 1, 10, 100]))
     ax[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
     ax[0].xaxis.set_minor_formatter(NullFormatter())
     ax[0].legend(loc="upper left")
-    ax[1].plot(z.N0, z.iters, color=C[0], marker="o", label="measured")
-    k = float((z.iters / z.N0).iloc[-1])
-    ax[1].plot(z.N0, k * z.N0, color=INK2, ls="--", lw=1.0, label=rf"${k:.2f}\,N$")
+    Ns = sorted(set(z3.N0) | (set(z2.dropna(subset=["iters"]).N0) if z2 is not None else set()))
+    k = float((z3.iters / z3.N0).iloc[-1])
+    ax[1].loglog(Ns, [k * n for n in Ns], color=INK2, ls="--", lw=1.0, label=rf"${k:.1f}\,N$")
+    ax[1].set_xscale("log", base=2)
+    ax[1].xaxis.set_major_locator(FixedLocator([2 ** e for e in range(6, 14) if Ns[0] <= 2 ** e <= Ns[-1]]))
+    ax[1].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax[1].xaxis.set_minor_locator(NullLocator())
+    plain_log(ax[1], "y", 1, 6)
     ax[1].set_xlabel("grid points per direction $N$")
     ax[1].set_ylabel(r"iterations to $\varepsilon=10^{-8}$")
     ax[1].set_title("(b) Iterations")
     ax[1].legend(loc="upper left")
-    ax[2].loglog(z.N0, z.ts, color=C[0], marker="o", label="measured")
-    ax[2].loglog(z.N0, z.ts.iloc[-1] * (z.N0 / z.N0.iloc[-1]) ** 4, color=INK2, ls="--", lw=1.0,
-                 label=r"$\propto N^4$")
-    ax[2].set_xlabel("grid points per direction $N$")
+    ax[2].set_xlabel("unknowns (millions)")
     ax[2].set_ylabel("time to solution (s)")
     ax[2].set_title("(c) Time to solution")
-    log2_axis(ax[2], [64, 128, 256, 512])
+    ax[2].xaxis.set_major_locator(FixedLocator([0.1, 1, 10, 100]))
+    ax[2].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax[2].xaxis.set_minor_formatter(NullFormatter())
     plain_log(ax[2], "y", -2, 5)
     ax[2].legend(loc="upper left")
     fig.tight_layout()
-    suptitle(fig, "Serial solver: cost against problem size")
     save(fig, "sizes")
-    z["mib"] = 4 * (z.N0.astype(float) + 2) ** 3 * 8 / 2 ** 20     # x, r, p, Ap with ghost layers
-    tables["sizes"] = [f"{int(r.N0)} & {r.n / 1e6:.2f} & {r.nnz / 1e6:.1f} & {r.mib:.0f} & "
-                       f"{1e3 * r.t:.2f} & {r.nspt:.2f} & {r.bw:.1f} & {int(r.iters)} & {r.ts:.1f} & "
-                       f"${sci(r.err, 2)}$ \\\\" for _, r in z.iterrows()]
-    import numpy as np
-    lx = np.log(z.N0.astype(float))
-    slope_t = float(np.polyfit(lx, np.log(z.t), 1)[0])        # least-squares exponents
-    slope_s = float(np.polyfit(lx, np.log(z.ts), 1)[0])
-    ipn = z.iters / z.N0
-    r64, r512 = z.iloc[0], z.iloc[-1]
-    macros.update({"SzNmin": str(int(r64.N0)), "SzNmax": str(int(r512.N0)), "SzRuns": str(len(z)),
-                   "SzNsSmall": fmt(r64.nspt, 2), "SzNsLarge": fmt(r512.nspt, 2),
-                   "SzNsMin": fmt(z.nspt.min(), 2), "SzNsMax": fmt(z.nspt.max(), 2),
-                   "SzBwLarge": fmt(r512.bw, 1), "SzSlopeIter": fmt(slope_t, 2), "SzSlopeSolve": fmt(slope_s, 2),
-                   "SzItPerN": fmt(k, 2), "SzItMin": str(int(r64.iters)), "SzItMax": str(int(r512.iters)),
-                   "SzSolveMin": fmt(r64.ts, 2), "SzSolveMax": fmt(r512.ts, 0),
-                   "SzSolveMaxMin": fmt(r512.ts / 60, 1), "SzTiterMax": fmt(1e3 * r512.t, 0),
-                   "SzBwMin": fmt(z.bw.min(), 0), "SzBwMax": fmt(z.bw.max(), 0),
-                   "SzItPerNmin": fmt(ipn.min(), 2), "SzItPerNmax": fmt(ipn.max(), 2),
-                   "SzMiBSmall": fmt(r64.mib, 1), "SzGiBLarge": fmt(r512.mib / 1024, 1),
-                   "SzDoubling": fmt(r512.ts / float(z[z.N0 == r512.N0 // 2].ts.iloc[0]), 1)
-                   if (z.N0 == r512.N0 // 2).any() else "--"})
-    return z
+
+    def rows(z):
+        return [f"{int(r.N0)} & {r.n / 1e6:.2f} & {r.nnz / 1e6:.1f} & {r.mib:.0f} & "
+                f"{1e3 * r.t:.2f} & {r.nspt:.2f} & {r.bw:.1f} & "
+                + (f"{int(r.iters)} & {r.ts:.1f} & ${sci(r.err, 2)}$" if r.iters == r.iters else "-- & -- & --")
+                + " \\\\" for _, r in z.iterrows()]
+    tables["sizes"] = rows(z3)
+    tables["sizes2d"] = rows(z2) if z2 is not None else []
+
+    def stats(z, tag):
+        zz = z.dropna(subset=["iters"])
+        lx = np.log(z.N0.astype(float))
+        st = float(np.polyfit(lx, np.log(z.t), 1)[0])
+        ss = float(np.polyfit(np.log(zz.N0.astype(float)), np.log(zz.ts), 1)[0])
+        ipn = zz.iters / zz.N0
+        a, e, ze = z.iloc[0], z.iloc[-1], zz.iloc[-1]
+        m = {"Nmin": str(int(a.N0)), "Nmax": str(int(e.N0)), "NsSmall": fmt(a.nspt, 2), "NsLarge": fmt(e.nspt, 2),
+             "NsMin": fmt(z.nspt.min(), 2), "NsMax": fmt(z.nspt.max(), 2), "BwLarge": fmt(e.bw, 1),
+             "SlopeIter": fmt(st, 2), "SlopeSolve": fmt(ss, 2), "ItPerN": fmt(float(ipn.iloc[-1]), 2),
+             "ItMin": str(int(zz.iloc[0].iters)), "ItMax": str(int(ze.iters)), "SolveMin": fmt(zz.iloc[0].ts, 2),
+             "SolveMax": fmt(ze.ts, 0), "SolveMaxMin": fmt(ze.ts / 60, 1), "TiterMax": fmt(1e3 * e.t, 0),
+             "BwMin": fmt(z.bw.min(), 0), "BwMax": fmt(z.bw.max(), 0), "ItPerNmin": fmt(ipn.min(), 2),
+             "ItPerNmax": fmt(ipn.max(), 2), "MiBSmall": fmt(a.mib, 1), "GiBLarge": fmt(e.mib / 1024, 1),
+             "NsolveMax": str(int(ze.N0)), "DofsMax": fmt(e.n / 1e6, 0),
+             "Doubling": fmt(ze.ts / float(zz[zz.N0 == ze.N0 // 2].ts.iloc[0]), 1) if (zz.N0 == ze.N0 // 2).any() else "--"}
+        macros.update({tag + k2: v for k2, v in m.items()})
+    stats(z3, "Sz")
+    if z2 is not None:
+        stats(z2, "SzTwo")
+        r2 = z2.iloc[1] if len(z2) > 1 else z2.iloc[0]
+        macros.update({"SzTwoNsSecond": fmt(r2.nspt, 2), "SzTwoNsecond": str(int(r2.N0))})
+    return z3, z2
 
 
 # ---------------------------------------------------------------- multi-node strong scaling
@@ -526,6 +556,132 @@ def fig_commvol(path, macros):
                    "CVmsgsThreeD": str(int(s64.loc["3D", "msgs_iter_max"]))})
 
 
+def fig_two_d(b2, b3, cpn, macros, tables):
+    """2D problem on 1-256 processes: strong, weak and variants, next to the 3D curves"""
+    s = b2[b2.exp == "strong2d"].sort_values("P").copy()
+    if s.empty:
+        return None
+    t1 = float(s[s.P == 1].t_iter.iloc[0])
+    s["S"] = t1 / s.t_iter
+    s["E"] = s.S / s.P
+    t32 = float(s[s.P == cpn].t_iter.iloc[0])
+    s["En"] = t32 * cpn / (s.t_iter * s.P)
+    w = b2[b2.exp == "weak2d"].sort_values("P").copy()
+    w["tpp"] = w.t_iter / w.nloc_max
+    w32 = float(w[w.P == cpn].tpp.iloc[0])
+    s3 = b3[b3.exp == "strong"].sort_values("P")
+    w3 = b3[b3.exp == "weak"].sort_values("P")
+    t32_3 = float(s3[s3.P == cpn].t_iter.iloc[0])
+    wtp3 = w3.t_iter / w3.nloc_max
+    w32_3 = float(wtp3[w3.P == cpn].iloc[0])
+    Ps = s.P.values
+    fig, ax = plt.subplots(1, 3, figsize=(6.8, 2.45), gridspec_kw={"width_ratios": [1, 1, 1.25]})
+    ax[0].plot(Ps, Ps, color=INK2, lw=1.0, ls="--", label="ideal")
+    ax[0].plot(Ps, s.S, color=C[1], marker="s", label=f"2D ${int(s.N0.iloc[0])}^2$")
+    s3S = float(s3[s3.P == 1].t_iter.iloc[0]) / s3.t_iter
+    ax[0].plot(s3.P, s3S, color=C[0], marker="o", label="3D $512^3$")
+    ax[0].axvline(cpn, color=C[5], lw=0.8, ls=":")
+    ax[0].set_xscale("log", base=2)
+    ax[0].xaxis.set_major_locator(FixedLocator([1, 4, 16, 64, 256]))
+    ax[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
+    ax[0].xaxis.set_minor_locator(NullLocator())
+    log2_axis(ax[0], [1, 4, 16, 64, 256], axis="y")
+    ax[0].set_ylim(0.8, 330)
+    ax[0].set_xlabel("MPI processes $P$")
+    ax[0].set_ylabel("speedup over one process")
+    ax[0].set_title("(a) Strong scaling")
+    ax[0].legend(loc="upper left", fontsize=6.3)
+    sn = s[s.P >= cpn]
+    ax[1].plot(sn.P, 100 * sn.En, color=C[1], marker="s", label="2D strong")
+    s3n = s3[s3.P >= cpn]
+    ax[1].plot(s3n.P, 100 * t32_3 * cpn / (s3n.t_iter * s3n.P), color=C[0], marker="o", label="3D strong")
+    wn = w[w.P >= cpn]
+    ax[1].plot(wn.P, 100 * w32 / wn.tpp, color=C[1], marker="s", ls="--", mfc="white", label="2D weak")
+    w3n = w3[w3.P >= cpn]
+    ax[1].plot(w3n.P, 100 * w32_3 / (w3n.t_iter / w3n.nloc_max), color=C[0], marker="o", ls="--", mfc="white",
+               label="3D weak")
+    ax[1].axhline(100, color=INK2, lw=1.0, ls="--")
+    log2_axis(ax[1], sn.P)
+    ax[1].set_ylim(50, 110)
+    ax[1].set_xlabel("MPI processes $P$ (32 per node)")
+    ax[1].set_ylabel("efficiency vs. one node (%)")
+    ax[1].set_title("(b) Across nodes")
+    ax[1].legend(loc="lower left", fontsize=6.3)
+    base = s.set_index("P").t_iter
+    labs = [("decomp2d", "slabs (1D)"), ("comm2d", "blocking halo"), ("alg2d", "CG1")]
+    Pv = [p for p in Ps if p >= cpn]
+    wd = 0.8 / len(labs)
+    rel = {}
+    for k, (e, lab) in enumerate(labs):
+        d = b2[b2.exp == e].set_index("P").t_iter.reindex(Pv)
+        rel[e] = d / base.reindex(Pv)
+        xs = [i + (k - (len(labs) - 1) / 2) * wd for i in range(len(Pv))]
+        ax[2].bar(xs, rel[e], width=wd * 0.92, color=C[[3, 2, 4][k]], label=lab, edgecolor="white", linewidth=0.6)
+    ax[2].axhline(1.0, color=INK, lw=1.0)
+    ax[2].set_xticks(range(len(Pv)))
+    ax[2].set_xticklabels([str(int(p)) for p in Pv])
+    ax[2].set_ylim(0.7, 1.2)
+    ax[2].set_xlabel("MPI processes $P$")
+    ax[2].set_ylabel("time / baseline time")
+    ax[2].set_title("(c) 2D design choices")
+    ax[2].grid(axis="x", visible=False)
+    ax[2].legend(loc="upper left", fontsize=6.3, ncol=3)
+    fig.tight_layout()
+    save(fig, "twod")
+    wi = w.set_index("P")
+    rows = []
+    for _, r in s.iterrows():
+        P = int(r.P)
+        comm = (r.t_halo_it + r.t_reduce_it) / r.t_iter * 100
+        en = f"{100 * r.En:.0f}" if P >= cpn else "--"
+        wt = f"{1e3 * wi.loc[P, 't_iter']:.1f}" if P in wi.index else "--"
+        we = f"{100 * w32 / wi.loc[P, 'tpp']:.0f}" if P in wi.index and P >= cpn else "--"
+        rows.append(f"{P} & {max(1, P // cpn)} & {int(r.px)}$\\times${int(r.pz)} & {1e3 * r.t_iter:.2f} & {r.S:.1f} & "
+                    f"{100 * r.E:.0f} & {en} & {comm:.0f} & {r.halo_bytes_iter_max / 2 ** 10:.0f} & {wt} & {we} \\\\")
+    tables["strong2d"] = rows
+    last, n1 = s.iloc[-1], s[s.P == cpn].iloc[0]
+    lw = w.iloc[-1]
+    pm = int(last.P)
+    sol = b2[b2.exp == "solve2d"]
+    rr = {e: (float(rel[e].min()), float(rel[e].max()), float(rel[e].iloc[-1]), float(rel[e].iloc[0])) for e in rel}
+    macros.update({
+        "TwoN": str(int(s.N0.iloc[0])), "TwoDofs": fmt(int(s.N0.iloc[0]) ** 2 / 1e6, 0),
+        "TwoPoneT": fmt(1e3 * t1, 0), "TwoTnode": fmt(1e3 * n1.t_iter, 1), "TwoTmax": fmt(1e3 * last.t_iter, 2),
+        "TwoSpeedNode": fmt(n1.S, 1), "TwoEffNode": fmt(100 * n1.E, 0), "TwoSpeedMax": fmt(last.S, 1),
+        "TwoEffMax": fmt(100 * last.E, 0), "TwoNodeEffMax": fmt(100 * last.En, 0),
+        "TwoNodeSpeedMax": fmt(t32 / float(last.t_iter), 2),
+        "TwoSpeedFour": fmt(float(s[s.P == 4].S.iloc[0]), 2),
+        "TwoCommMax": fmt((last.t_halo_it + last.t_reduce_it) / last.t_iter * 100, 0),
+        "TwoRedMsMax": fmt(1e3 * last.t_reduce_it, 2), "TwoHaloMsMax": fmt(1e3 * last.t_halo_it, 2),
+        "TwoRedFracMax": fmt(100 * last.t_reduce_it / last.t_iter, 0),
+        "TwoHaloFracMax": fmt(100 * last.t_halo_it / last.t_iter, 0),
+        "TwoHaloKiBMax": fmt(last.halo_bytes_iter_max / 2 ** 10, 0), "TwoMsgsMax": str(int(last.msgs_iter_max)),
+        "TwoLocalMax": f"{int(s.N0.iloc[0]) // int(last.px)}$\\times${int(s.N0.iloc[0]) // int(last.pz)}",
+        "TwoBwNode": fmt(int(s.N0.iloc[0]) ** 2 * BYTES_CPU / float(n1.t_iter) / 1e9, 0),
+        "TwoBwMax": fmt(int(s.N0.iloc[0]) ** 2 * BYTES_CPU / float(last.t_iter) / 1e9, 0),
+        "TwoWeakLocal": str(round(float(w.nloc_avg.iloc[0]) ** 0.5)), "TwoWeakTone": fmt(1e3 * float(w.t_iter.iloc[0]), 1),
+        "TwoWeakTnode": fmt(1e3 * float(w[w.P == cpn].t_iter.iloc[0]), 1), "TwoWeakTmax": fmt(1e3 * lw.t_iter, 1),
+        "TwoWeakNodeEff": fmt(100 * w32 / lw.tpp, 0), "TwoWeakNmax": str(int(lw.N0)),
+        "TwoWeakDofsMax": fmt(int(lw.N0) ** 2 / 1e9, 2),
+        "TwoWeakEffNode": fmt(100 * float(w.tpp.iloc[0]) / w32, 0),
+        "TwoSlabMax": fmt(rr["decomp2d"][2], 2), "TwoSlabMin": fmt(rr["decomp2d"][3], 2),
+        "TwoSlabBest": fmt(rr["decomp2d"][0], 2), "TwoSlabPct": fmt(100 * (1 - rr["decomp2d"][2]), 0),
+        "TwoBlockRange": fmt(rr["comm2d"][0], 2) + "--" + fmt(rr["comm2d"][1], 2), "TwoBlockMax": fmt(rr["comm2d"][2], 2),
+        "TwoCGoneRange": fmt(rr["alg2d"][0], 2) + "--" + fmt(rr["alg2d"][1], 2), "TwoCGoneMax": fmt(rr["alg2d"][2], 2),
+        "TwoSlabHaloKiB": fmt(2 * int(s.N0.iloc[0]) * 8 / 1024, 0),
+    })
+    if not sol.empty:
+        c0, c1 = sol[sol.alg == "cg"].iloc[0], sol[sol.alg == "cg1"]
+        macros.update({"TwoSolveIters": str(int(c0.iters)), "TwoSolveCG": fmt(float(c0.t_solve), 0),
+                       "TwoSolveTrue": f"${sci(float(c0.true_relres), 1)}$",
+                       "TwoSolveSerialEst": fmt(int(c0.iters) * t1, 0),
+                       "TwoSolveSpeedup": fmt(int(c0.iters) * t1 / float(c0.t_solve), 0)})
+        if not c1.empty:
+            macros["TwoSolveCGone"] = fmt(float(c1.t_solve.iloc[0]), 0)
+            macros["TwoSolveCGoneGain"] = fmt(100 * (1 - float(c1.t_solve.iloc[0]) / float(c0.t_solve)), 0)
+    return s, t1
+
+
 def fig_hybrid(b, macros, tables):
     h = b[b.exp == "hybrid"].sort_values("T")
     if h.empty:
@@ -560,11 +716,16 @@ def fig_hybrid(b, macros, tables):
 
 
 # ---------------------------------------------------------------- GPU
-def fig_gpu(gdir, s, t_ser, macros, tables):
+def fig_gpu(gdir, s, t_ser, macros, tables, g2dir=None, s2=None):
     p = os.path.join(gdir, "gpu.csv")
     if not os.path.exists(p):
         return
     g = pd.read_csv(p)
+    g2 = None
+    if g2dir and os.path.exists(os.path.join(g2dir, "gpu.csv")):
+        g2 = pd.read_csv(os.path.join(g2dir, "gpu.csv"))
+        g2s = best_of(g2[g2.exp == "gsize2d"], KEYS).sort_values("N0").set_index("N0")
+        bw2 = g2s.index.to_series().astype(float) ** 2 * BYTES_GPU / g2s.t_iter / 1e9
     gs = best_of(g[g.exp == "gsize"], KEYS).sort_values(["alg", "N0"])
     cg, c1 = gs[gs.alg == "cg"].set_index("N0"), gs[gs.alg == "cg1"].set_index("N0")
     Ns = list(cg.index)
@@ -572,14 +733,17 @@ def fig_gpu(gdir, s, t_ser, macros, tables):
                                                                               ("cg1", c1.reset_index())]}
     fig, ax = plt.subplots(1, 2, figsize=(6.6, 2.6), gridspec_kw={"width_ratios": [1.1, 1]})
     ax[0].axhline(A40_PEAK, color=INK2, ls="--", lw=1.0, label="A40 peak (696 GB/s)")
-    ax[0].plot(Ns, bw["cg"].values, color=C[0], marker="o", label="classic CG")
-    ax[0].plot(Ns, bw["cg1"].values, color=C[1], marker="s", label="CG1")
-    ax[0].set_xscale("log", base=2)
-    ax[0].xaxis.set_major_locator(FixedLocator(Ns))
-    ax[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{int(v)}"))
-    ax[0].xaxis.set_minor_locator(NullLocator())
+    n3 = [N ** 3 / 1e6 for N in Ns]
+    ax[0].plot(n3, bw["cg"].values, color=C[0], marker="o", label="3D, classic CG")
+    ax[0].plot(n3, bw["cg1"].values, color=C[0], marker="o", ls="--", mfc="white", label="3D, CG1")
+    if g2 is not None:
+        ax[0].plot(g2s.index.astype(float) ** 2 / 1e6, bw2.values, color=C[1], marker="s", label="2D, classic CG")
+    ax[0].set_xscale("log")
+    ax[0].xaxis.set_major_locator(FixedLocator([1, 10, 100]))
+    ax[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax[0].xaxis.set_minor_formatter(NullFormatter())
     ax[0].set_ylim(0, 800)
-    ax[0].set_xlabel("grid points per direction $N$ (one GPU)")
+    ax[0].set_xlabel("unknowns (millions, one GPU)")
     ax[0].set_ylabel("DRAM bandwidth (GB/s, 88 B/point)")
     ax[0].set_title("(a) One A40 across problem sizes")
     ax[0].legend(loc="lower right", fontsize=6.5)
@@ -628,7 +792,28 @@ def fig_gpu(gdir, s, t_ser, macros, tables):
                    "GpuBwAboveMin": fmt(bw["cg"][1:].min(), 0),
                    "GpuBwRatio": fmt(bw["cg"][Ns.index(n512)] / (n512 ** 3 * BYTES_CPU / t_sock / 1e9), 1),
                    "GpuMLUPS": fmt(r.mlups / 1e3, 2)})
+    if g2 is not None:
+        tables["gpu2d"] = [f"{int(N)} & {N ** 2 / 1e6:.0f} & {3 * 4 * (N + 2) ** 2 * 8 / 2 ** 30:.1f} & "
+                           f"{1e3 * r2.t_iter:.2f} & -- & {bw2[N]:.0f} & {100 * r2.t_spmv_it / r2.t_iter:.0f} & "
+                           f"{r2.mlups / 1e3:.2f} \\\\" for N, r2 in g2s.iterrows()]
+        n2 = 8192 if 8192 in g2s.index else int(g2s.index[-2])
+        r2 = g2s.loc[n2]
+        macros.update({"GpuTwoN": str(n2), "GpuTwoT": fmt(1e3 * r2.t_iter, 2), "GpuTwoBw": fmt(bw2[n2], 0),
+                       "GpuTwoBwMin": fmt(bw2.min(), 0), "GpuTwoBwMax": fmt(bw2.max(), 0),
+                       "GpuTwoNmin": str(int(g2s.index[0])), "GpuTwoNmax": str(int(g2s.index[-1])),
+                       "GpuTwoDofsMax": fmt(int(g2s.index[-1]) ** 2 / 1e6, 0),
+                       "GpuTwoSpmvBw": fmt(n2 ** 2 * 16 / r2.t_spmv_it / 1e9, 0),
+                       "GpuTwoVecBw": fmt(n2 ** 2 * 72 / r2.t_vec_it / 1e9, 0)})
+        if s2 is not None:
+            macros.update({"GpuTwoVsSocket": fmt(float(s2[s2.P == 32].t_iter.iloc[0]) / r2.t_iter, 1),
+                           "GpuTwoVsEight": fmt(r2.t_iter / float(s2[s2.P == s2.P.max()].t_iter.iloc[0]), 1)})
+        gs2 = g2[g2.exp == "gsolve2d"]
+        if not gs2.empty:
+            macros.update({"GpuTwoSolve": fmt(float(gs2.t_solve.iloc[0]), 0)})
+        v = g2[g2.exp == "validate2d"]
     sol = g[g.exp == "gsolve"]
+    if g2 is not None:
+        sol = pd.concat([sol, g2[g2.exp == "gsolve2d"]], ignore_index=True)
     return sol
 
 
@@ -644,6 +829,18 @@ def gpu_validation(vdir, macros):
                    "GpuValP": ", ".join(str(p) for p in ps), "GpuValFail": m.group(1) if m else "--"})
 
 
+def gpu_validation2d(vdir, macros):
+    p = os.path.join(vdir, "validation.txt")
+    if not os.path.exists(p):
+        return
+    txt = open(p).read()
+    vals = [float(x) for x in re.findall(r"PASS\s+2D max\S+\s*=\s*([\d.e+-]+)", txt)]
+    ps = sorted(set(int(x) for x in re.findall(r"2D max\S+\s*=\s*\S+\s+\(P=(\d+)", txt)))
+    fails = len(re.findall(r"FAIL\s+2D", txt))
+    macros.update({"GpuValTwoRuns": str(len(vals)), "GpuValTwoWorst": f"${sci(max(vals), 1)}$" if vals else "--",
+                   "GpuValTwoP": ", ".join(str(p) for p in ps), "GpuValTwoFail": str(fails)})
+
+
 # ---------------------------------------------------------------- validation
 def fig_validation(vdir, macros, tables):
     conv = os.path.join(vdir, "convergence.csv")
@@ -656,19 +853,27 @@ def fig_validation(vdir, macros, tables):
             d = cv[(cv.code == code) & (cv.alg == alg)].sort_values("N0")
             h = 1.0 / (d.N0 + 1)
             ax[0].plot(h, d.err_l2, color=col, marker=mk, ls=ls, label=lab, markersize=6 if mk != "o" else 4)
+        c2p = os.path.join(vdir, "convergence2d.csv")
+        cv2 = pd.read_csv(c2p) if os.path.exists(c2p) else None
+        if cv2 is not None:
+            for code, alg, lab, mk, ls in [("serial", "cg", "2D serial CG", "s", "-"),
+                                           ("mpi", "cg", "2D MPI CG, $P=4$", "x", "none")]:
+                d = cv2[(cv2.code == code) & (cv2.alg == alg)].sort_values("N0")
+                ax[0].plot(1.0 / (d.N0 + 1), d.err_l2, color=C[3], marker=mk, ls=ls, label=lab,
+                           markersize=6 if mk == "x" else 3.6, mfc="white" if mk == "s" else None)
         d = cv[(cv.code == "serial")].sort_values("N0")
         h = 1.0 / (d.N0 + 1)
         ref = d.err_l2.iloc[-1] * (h / h.iloc[-1]) ** 2
         ax[0].plot(h, ref * 0.5, color=INK2, ls="--", lw=1.0, label="$O(h^2)$ reference")
         ax[0].set_xscale("log")
         ax[0].set_yscale("log")
-        ax[0].xaxis.set_major_locator(FixedLocator([0.01, 0.02, 0.05]))
+        ax[0].xaxis.set_major_locator(FixedLocator([0.005, 0.01, 0.02, 0.05]))
         ax[0].xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
         ax[0].xaxis.set_minor_formatter(NullFormatter())
         ax[0].set_xlabel("grid spacing $h$")
         ax[0].set_ylabel("$\\|u_h - u\\|_{L^2}$")
         ax[0].set_title("(a) Discretisation error")
-        ax[0].legend(loc="upper left", fontsize=7)
+        ax[0].legend(loc="upper left", fontsize=6.3)
         for k, alg in enumerate(["cg", "cg1", "pipecg"]):
             p = os.path.join(vdir, f"hist_{alg}.csv")
             if not os.path.exists(p):
@@ -699,13 +904,24 @@ def fig_validation(vdir, macros, tables):
         tables["convergence"] = rows
         ords = [float(r.split("&")[-1].strip(" \\")) for r in rows[1:]]
         macros.update({"OrderMin": f"{min(ords):.3f}", "OrderMax": f"{max(ords):.3f}"})
+        if cv2 is not None:
+            s2 = cv2[cv2.code == "serial"].sort_values("N0")
+            o2 = [math.log(a / b) / math.log((m + 1) / (n + 1)) for (n, a), (m, b) in
+                  zip(zip(s2.N0, s2.err_l2), zip(s2.N0[1:], s2.err_l2[1:]))]
+            macros.update({"OrderTwoMin": f"{min(o2):.3f}", "OrderTwoMax": f"{max(o2):.3f}",
+                           "ConvTwoNmin": str(int(s2.N0.iloc[0])), "ConvTwoNmax": str(int(s2.N0.iloc[-1]))})
     var = os.path.join(vdir, "variants.csv")
     if os.path.exists(var):
         v = pd.read_csv(var)
         ref = pd.read_csv(os.path.join(vdir, "serial_ref.csv")).iloc[0]
         rows = []
-        for (alg, comm), d in v.groupby(["alg", "comm"], sort=False):
-            rows.append(f"{ {'cg': 'CG', 'cg1': 'CG1', 'pipecg': 'pipelined CG'}[alg]} & {comm} & {len(d)} & "
+        v2p = os.path.join(vdir, "variants2d.csv")
+        v2 = pd.read_csv(v2p) if os.path.exists(v2p) else None
+        for prob, vv, nn in [("3D", v, int(ref.N0)), ("2D", v2, 100)]:
+          if vv is None:
+            continue
+          for (alg, comm), d in vv.groupby(["alg", "comm"], sort=False):
+            rows.append(f"{prob} ${nn}^{prob[0]}$ & { {'cg': 'CG', 'cg1': 'CG1', 'pipecg': 'pipelined CG'}[alg]} & {comm} & {len(d)} & "
                         f"{d.P.min()}--{d.P.max()} & {d['T'].min()}--{d['T'].max()} & "
                         f"{int(d.iters.min())}--{int(d.iters.max())} & ${sci(d.maxdiff_vs_serial.max(), 1)}$ & "
                         f"${sci(d.true_relres.max(), 2)}$ \\\\")
@@ -717,6 +933,14 @@ def fig_validation(vdir, macros, tables):
         macros.update({"ValRuns": str(len(v)), "ValEdge": str(ne), "ValN": str(int(ref.N0)),
                        "ValIters": str(int(ref.iters)), "ValWorstCG": f"${sci(cg, 1)}$",
                        "ValWorstPipe": f"${sci(pp, 1)}$", "ValErrMax": f"${sci(ref.err_max, 2)}$"})
+        if v2 is not None:
+            r2 = pd.read_csv(os.path.join(vdir, "serial_ref2d.csv")).iloc[0]
+            e2 = os.path.join(vdir, "edge2d.csv")
+            macros.update({"ValTwoRuns": str(len(v2)), "ValTwoEdge": str(len(pd.read_csv(e2))) if os.path.exists(e2) else "0",
+                           "ValTwoIters": str(int(r2.iters)),
+                           "ValTwoWorstCG": f"${sci(v2[v2.alg != 'pipecg'].maxdiff_vs_serial.max(), 1)}$",
+                           "ValTwoWorstPipe": f"${sci(v2[v2.alg == 'pipecg'].maxdiff_vs_serial.max(), 1)}$",
+                           "ValTwoErrMax": f"${sci(r2.err_max, 2)}$"})
     for alg in ["cg", "pipecg"]:
         p = os.path.join(vdir, f"hist_{alg}.csv")
         if os.path.exists(p):
@@ -750,30 +974,44 @@ def node_validation(path, macros):
 
 
 # ---------------------------------------------------------------- time to solution
-def tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=None):
+def tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=None, b2=None, t1_2d=None):
     name = {"cg": "CG", "cg1": "CG1", "pipecg": "pipelined CG"}
     rows = []
+    p3 = "3D $512^3$"
     t_ser = None
     if sizes is not None and (sizes.N0 == 512).any():
         r = sizes[sizes.N0 == 512].iloc[0]
         # speedups use the serial baseline rate of all other comparisons (iterations x t_ser_iter);
         # the size study's own solve ran on a shared node and is listed as measured
         t_ser = int(r.iters) * t_ser_iter if t_ser_iter else float(r.ts)
-        rows.append(f"1 core (shared node) & CG & {int(r.iters)} & {r.ts:.0f} & {1e3 * r.ts / r.iters:.0f} & "
+        rows.append(f"{p3} & 1 core (shared node) & CG & {int(r.iters)} & {r.ts:.0f} & {1e3 * r.ts / r.iters:.0f} & "
                     f"${sci(r.tr, 2)}$ & ${sci(r.err, 2)}$ & -- \\\\")
         macros.update({"SolveSerialEst": fmt(t_ser, 0), "SolveSerialMeas": fmt(float(r.ts), 0)})
     s = b[b.exp == "solve"]
     nodes = int(s.P.max()) // cpn if not s.empty else 0
     for _, r in s.iterrows():
         sp = f"{t_ser / r.t_solve:.0f}" if t_ser else "--"
-        rows.append(f"{int(r.P)} cores ({nodes} nodes) & {name[r.alg]} & {int(r.iters)} & {r.t_solve:.1f} & "
+        rows.append(f"{p3} & {int(r.P)} cores ({nodes} nodes) & {name[r.alg]} & {int(r.iters)} & {r.t_solve:.1f} & "
                     f"{1e3 * r.t_solve / r.iters:.2f} & ${sci(r.true_relres, 2)}$ & ${sci(r.err_max, 2)}$ & {sp} \\\\")
-    if gsol is not None:
-        for _, r in gsol.iterrows():
+    g3 = gsol[gsol.N1 > 1] if gsol is not None else None
+    if g3 is not None:
+        for _, r in g3.iterrows():
             sp = f"{t_ser / r.t_solve:.0f}" if t_ser else "--"
-            rows.append(f"1 A40 GPU & {name[r.alg]} & {int(r.iters)} & {r.t_solve:.1f} & "
+            rows.append(f"{p3} & 1 A40 GPU & {name[r.alg]} & {int(r.iters)} & {r.t_solve:.1f} & "
+                        f"{1e3 * r.t_solve / r.iters:.2f} & ${sci(r.true_relres, 2)}$ & ${sci(r.err_max, 2)}$ & {sp} \\\\")
+    # 2D rows: speedup relative to the one-process rate of the same job (iterations x t(P=1))
+    if b2 is not None:
+        s2 = b2[b2.exp == "solve2d"]
+        g2 = gsol[gsol.N1 == 1] if gsol is not None else pd.DataFrame()
+        rows.append("\\midrule")
+        for _, r in pd.concat([s2, g2], ignore_index=True).iterrows():
+            ref = int(r.iters) * t1_2d if t1_2d else None
+            sp = f"{ref / r.t_solve:.0f}" if ref else "--"
+            plat = f"{int(r.P)} cores ({int(r.P) // cpn} nodes)" if r.code == "mpi" else "1 A40 GPU"
+            rows.append(f"2D ${int(r.N0)}^2$ & {plat} & {name[r.alg]} & {int(r.iters)} & {r.t_solve:.1f} & "
                         f"{1e3 * r.t_solve / r.iters:.2f} & ${sci(r.true_relres, 2)}$ & ${sci(r.err_max, 2)}$ & {sp} \\\\")
     tables["solve"] = rows
+    gsol = g3
     cg, pp, c1 = s[s.alg == "cg"], s[s.alg == "pipecg"], s[s.alg == "cg1"]
     if not cg.empty:
         macros.update({"SolveIters": str(int(cg.iters.iloc[0])), "SolveCG": fmt(float(cg.t_solve.iloc[0]), 1),
@@ -795,7 +1033,8 @@ def tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=None):
 
 # every macro the report uses defaults to "--" if its experiment is missing; the list is read
 # from report.tex (capitalised control sequences minus LaTeX's own)
-FIGURES = ["sizes", "strong", "breakdown", "variants", "commvol", "hybrid", "weak", "bandwidth", "validation", "gpu"]
+FIGURES = ["sizes", "strong", "breakdown", "variants", "commvol", "hybrid", "weak", "bandwidth", "validation", "gpu",
+           "twod"]
 LATEX_OWN = {"LARGE", "Cref", "Omega", "Comment", "State", "For", "EndFor", "While", "EndWhile", "If", "EndIf"}
 
 
@@ -815,6 +1054,9 @@ def main():
     ap.add_argument("--gpu", default=os.path.join(RES, "vanda_gpu"))
     ap.add_argument("--gpuval", default=os.path.join(RES, "vanda_gpu_val"))
     ap.add_argument("--validation", default=os.path.join(RES, "validation"))
+    ap.add_argument("--main2d", default=os.path.join(RES, "vanda2d"))
+    ap.add_argument("--sizes2d", default=os.path.join(RES, "vanda_sizes2d"))
+    ap.add_argument("--gpu2d", default=os.path.join(RES, "vanda_gpu2d"))
     a = ap.parse_args()
     os.makedirs(GEN, exist_ok=True)
     for f in FIGURES:
@@ -848,15 +1090,21 @@ def main():
         else float(b[(b.exp == "strong") & (b.P == 1)].t_iter.iloc[0])
     stp = os.path.join(a.node, "stream.csv")
     stream = pd.read_csv(stp) if os.path.exists(stp) else None
-    sizes = fig_sizes(a.sizes, macros, tables)
+    sizes, sizes2d = fig_sizes(a.sizes, a.sizes2d, macros, tables)
     s = fig_strong(b, t_ser, cpn, macros, tables)
     fig_bandwidth(s, stream, cpn, macros)
     fig_weak(b, cpn, macros)
     fig_variants(b, macros, tables)
     fig_hybrid(b, macros, tables)
-    gsol = fig_gpu(a.gpu, s, t_ser, macros, tables)
+    b2 = s2 = t1_2d = None
+    if os.path.exists(os.path.join(a.main2d, "bench.csv")):
+        b2 = best_of(pd.read_csv(os.path.join(a.main2d, "bench.csv")), KEYS)
+        b2.to_csv(os.path.join(a.main2d, "bench_best.csv"), index=False)
+        s2, t1_2d = fig_two_d(b2, b, cpn, macros, tables)
+    gsol = fig_gpu(a.gpu, s, t_ser, macros, tables, g2dir=a.gpu2d, s2=s2)
     gpu_validation(a.gpuval, macros)
-    tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=t_ser)
+    gpu_validation2d(a.gpu2d, macros)
+    tab_solve(b, sizes, gsol, cpn, macros, tables, t_ser_iter=t_ser, b2=b2, t1_2d=t1_2d)
     fig_commvol(os.path.join(RES, "commvol.csv"), macros)
     fig_validation(a.validation, macros, tables)
     node_validation(os.path.join(a.node, "validation", "summary.txt"), macros)
@@ -871,7 +1119,8 @@ def main():
             f.write(f"\\newcommand{{\\{k}}}{{{v}}}\n")
         for k in sorted(defaults):
             f.write(f"\\providecommand{{\\{k}}}{{--}}\n")
-    for t in ["validation", "convergence", "strong", "variants", "hybrid", "solve", "sizes", "gpu"]:
+    for t in ["validation", "convergence", "strong", "variants", "hybrid", "solve", "sizes", "gpu", "sizes2d",
+              "strong2d", "gpu2d"]:
         with open(os.path.join(GEN, f"tab_{t}.tex"), "w") as f:
             f.write("\n".join(tables.get(t, [])) + "\n")
     Ps = tables.get("variants_cols", [])

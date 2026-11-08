@@ -18,11 +18,12 @@ at run time, and an MPI + OpenMP target-offload code for GPUs (one GPU per MPI r
 
 The report is `report/report.pdf`. Authors: Wu Yuhan, Zuo Dewei, Zhu Chen. Licence: MIT (`LICENSE`).
 
-Headline results (NUS Vanda, Xeon Platinum 8452Y, 32 cores per node; NVIDIA A40):
+Headline results (NUS Vanda, Xeon Platinum 8452Y, 32 cores per node; NVIDIA A40). 3D:
 512³ CG iteration in 9.23 ms on 256 cores / 8 nodes (speedup 59 over the serial code,
 81 % strong-scaling efficiency relative to one node, 83 % for 768³), 80 % node-level weak-scaling
 efficiency on 1.8 × 10⁹ unknowns, one A40 2.4 times faster than a 32-core socket
-(25.0 ms per 512³ iteration).
+(25.0 ms per 512³ iteration). 2D: 8192² iteration in 4.56 ms on 256 cores, 90 % strong and
+93 % weak node-level efficiency; slabs beat 2D blocks by 18 %.
 
 ## Quick start: from source to report
 
@@ -74,7 +75,9 @@ scripts/gpu_job.sh     builds with the NVIDIA HPC SDK on a Vanda GPU node and ru
 pbs/vanda256.pbs       PBS job: 8 nodes x 32 cores, strong/weak scaling, variants, hybrid, solves (256 processes)
 pbs/vanda_node.pbs     PBS job: one 32-core chunk: STREAM, serial baseline, quick validation
 pbs/vanda_sizes.pbs    PBS job: serial problem-size study (N = 64 ... 512) on one core
-pbs/vanda_gpu.pbs      PBS job: one A40 GPU (calls scripts/gpu_job.sh)
+pbs/vanda_gpu.pbs      PBS job: one A40 GPU (calls scripts/gpu_job.sh; -v GPU_2D=1 for the 2D problem)
+pbs/vanda2d.pbs        PBS job: 2D problem on 8 x 32 cores (strong, weak, variants, solves)
+pbs/vanda_sizes2d.pbs  PBS job: serial 2D problem-size study on one core
 pbs/vanda_suite.pbs    generic PBS job: build, quick validation, full suite (any node count)
 pbs/atlas_suite.pbs    same for Atlas (queue parallel24)
 pbs/validate.pbs       full validation as a PBS job
@@ -209,7 +212,7 @@ variants are compared iteration against iteration.
 
 ## Results included
 
-All measurements in the report, with the job logs in `results/vanda_logs/` (the size-study rerun has no log):
+All measurements in the report:
 
 * `results/vanda256/` — 8 nodes × 32 cores (one socket of 2 × Intel Xeon Platinum 8452Y per node),
   Open MPI 4.1.8, GCC 13.1.0: strong scaling (512³ from 1 to 256 processes, 768³ from 32), weak
@@ -223,7 +226,12 @@ All measurements in the report, with the job logs in `results/vanda_logs/` (the 
   validation against the serial solution with 1, 2, 4 and 8 ranks sharing the GPU is in
   `vanda_gpu_val/` (all PASS). The two FAIL lines at P = 4 in `vanda_gpu/validation.txt` are runs
   that never started (an Open MPI core-binding error, since fixed by `--bind-to none`).
-* `results/validation/` — the full correctness suite; `results/commvol.csv` — halo volumes.
+* `results/vanda2d/` — 2D problem on 8 × 32 cores: strong scaling of 8192² from 1 to 256 processes,
+  slab / blocking-halo / CG1 variants, weak scaling with 2048² per process, complete solves.
+* `results/vanda_sizes2d/` — serial 2D problem-size study, N = 256 … 8192.
+* `results/vanda_gpu2d/` — one A40, 2D problem: validation, size sweep 1024² … 16384², solve.
+* `results/validation/` — the full correctness suite for 3D and 2D (`*2d.csv`);
+  `results/commvol.csv` — halo volumes.
 
 ## Use of AI tools
 
