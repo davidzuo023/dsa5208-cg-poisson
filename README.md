@@ -23,7 +23,7 @@ Headline results (NUS Vanda, Xeon Platinum 8452Y, 32 cores per node; NVIDIA A40)
 81 % strong-scaling efficiency relative to one node, 83 % for 768³), 80 % node-level weak-scaling
 efficiency on 1.8 × 10⁹ unknowns, one A40 2.4 times faster than a 32-core socket
 (25.0 ms per 512³ iteration). 2D: 8192² iteration in 4.56 ms on 256 cores, 90 % strong and
-93 % weak node-level efficiency; slabs beat 2D blocks by 18 %.
+93 % weak node-level efficiency; slabs take 18 % less time than 2D blocks.
 
 ## Quick start: from source to report
 

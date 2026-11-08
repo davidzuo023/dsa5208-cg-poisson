@@ -367,7 +367,7 @@ def fig_strong(b, t_ser, cpn, macros, tables):
         "HaloKiBNode": fmt(n1.halo_bytes_iter_max / 2 ** 10, 0),
         "VecFracSerial": fmt(100 * float(s.iloc[0].t_vec_it / s.iloc[0].t_iter), 0),
         "NS": str(int(s.N0.iloc[0])), "NSdofs": fmt(int(s.N0.iloc[0]) ** 3 / 1e6, 0), "Iters": str(int(s.iters.iloc[0])),
-        "Reps": str(int(b.nreps.max())), "MedSpread": fmt(100 * b[b.exp != "solve"].spread.median(), 1),
+        "Reps": str(int(b.nreps.mode().iloc[0])), "MedSpread": fmt(100 * b[b.exp != "solve"].spread.median(), 1),
         "MaxSpread": fmt(100 * b[b.exp != "solve"].spread.max(), 0),
     })
     if l2 is not None:
@@ -771,7 +771,7 @@ def fig_gpu(gdir, s, t_ser, macros, tables, g2dir=None, s2=None):
     for N in Ns:
         r, q = cg.loc[N], c1.loc[N]
         sp = 100 * r.t_spmv_it / r.t_iter
-        mem = 4 * N ** 3 * 8 / 2 ** 30
+        mem = 4 * (N + 2) ** 3 * 8 / 2 ** 30
         rows.append(f"{N} & {N ** 3 / 1e6:.0f} & {mem:.1f} & {1e3 * r.t_iter:.2f} & {1e3 * q.t_iter:.2f} & "
                     f"{bw['cg'][Ns.index(N)]:.0f} & {sp:.0f} & {r.mlups / 1e3:.2f} \\\\")
     tables["gpu"] = rows
@@ -1080,9 +1080,9 @@ def main():
     pure = raw[(raw.exp == "hybrid") & (raw["T"] == 1)].assign(exp="strong")
     b = best_of(pd.concat([raw, pure], ignore_index=True), KEYS)
     hyb1 = b[(b.exp == "strong") & (b.P == int(pure.P.max()))] if not pure.empty else None
-    if hyb1 is not None:   # hybrid table/figure: P x 1 shows the pooled best, its own median
+    if hyb1 is not None:   # hybrid table/figure: P x 1 shows the pooled best and pooled median
         hb = b.index[(b.exp == "hybrid") & (b["T"] == 1)]
-        for c in ["t_iter", "t_spmv_it", "t_halo_it", "t_reduce_it", "t_vec_it"]:
+        for c in ["t_iter", "t_med", "t_spmv_it", "t_halo_it", "t_reduce_it", "t_vec_it"]:
             b.loc[hb, c] = float(hyb1[c].iloc[0])
     b.to_csv(os.path.join(a.main, "bench_best.csv"), index=False)
     nb = os.path.join(a.node, "bench.csv")

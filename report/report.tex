@@ -76,8 +76,8 @@ halo messages, cost most: they take \RedFracPmax\% of an iteration against \Halo
 exchange, almost all of it waiting at a barrier. Neither merging the two reductions nor pipelining them
 removes that wait. The 2D problem confirms both mechanisms and reverses one design choice: its halo is a
 \TwoHaloKiBMax\,KiB trickle, \Pmax{} cores reach \TwoNodeEffMax\% strong and \TwoWeakNodeEff\% weak
-efficiency relative to one node, and slabs, which lose a factor \RelOneD{} in 3D, are \TwoSlabPct\%
-faster than blocks in 2D. One A40 runs an iteration \GpuVsSocket{} (3D) and \GpuTwoVsSocket{} (2D) times
+efficiency relative to one node, and slabs, which lose a factor \RelOneD{} in 3D, take \TwoSlabPct\%
+less time than blocks in 2D. One A40 runs an iteration \GpuVsSocket{} (3D) and \GpuTwoVsSocket{} (2D) times
 faster than a 32-core CPU socket.
 
 \section{Introduction}\label{sec:intro}
@@ -179,7 +179,7 @@ search directions $\vb p_k$; the step length $\alpha_k$ minimises the $A$-norm o
 $\vb p_k$, and $\beta_{k+1}$ keeps the new direction $A$-conjugate to all previous ones. The scalar
 $\gamma_k=\|\vb r_k\|^2$ doubles as the stopping criterion with relative tolerance $\varepsilon$. The
 error contracts by roughly $(\sqrt{\kappa}-1)/(\sqrt{\kappa}+1)$ per iteration, so the number of
-iterations to reach a fixed $\varepsilon$ grows like $\sqrt{\kappa}\propto 1/h\propto N$; our runs need
+iterations to reach a fixed $\varepsilon$ grows like $\sqrt{\kappa}\propto 1/h\propto N$; our 3D runs need
 $\SzItPerNmin\,N$ to $\SzItPerNmax\,N$ iterations at $\varepsilon=10^{-8}$ (\cref{sec:serial}). One iteration consists of one
 stencil application, two inner products and three vector updates. Per grid point the stencil costs 7
 floating-point operations, its inner product 2 and the updates 8, i.e.\ 17 flops, against 11 loads and
@@ -469,8 +469,7 @@ $N=64$, $P=4$; the CG and CG1 curves coincide.}\label{fig:validation}
 
 \paragraph{Setup.}
 All measurements were taken on the NUS Vanda cluster through PBS Pro. The nodes we used carry two
-\MachineCPU{} processors with \MachineCPS{} cores each and two NUMA domains (three CPU nodes and five
-GPU nodes with the same processors, whose GPUs stayed idle). The multi-node job
+\MachineCPU{} processors with \MachineCPS{} cores each and two NUMA domains. The multi-node job
 requested \MachineNodes{} chunks of \MachineCPN{} cores on \MachineNodes{} different nodes, and on every node
 PBS assigned the same \MachineCPN{} cores, the odd-numbered cores 9--71, which Linux numbers on the second
 socket of these nodes. Each node thus contributes one socket and its memory controllers, and the job is a
@@ -484,12 +483,9 @@ unknowns) in 3D and $N=\TwoN$ (\TwoDofs{} million unknowns) in 2D; weak-scaling 
 $\WeakLocal^3$ and $\TwoWeakLocal^2$ points per process. Each timing run performs exactly \Iters{} iterations of the steady-state
 loop; work vectors are allocated before the clock starts, and the one-off setup stencil application of CG1
 and pipelined CG counts in the time to solution but not in the time per iteration. Every configuration ran
-\Reps{} times, interleaved with the others, and we report the fastest run; the $256\times1$ split of
-\cref{sec:hybrid} is the baseline configuration again, so its runs are pooled with the strong-scaling runs
-at $P=256$. The median spread between
-repetitions is \MedSpread\%, but the nodes are shared with other users' jobs, and a few multi-node runs
-caught a slow node or a busy network and took up to \MaxSpread\% longer; the fastest run is the one that
-measures the code. The GPU runs used one \GpuName{} (48\,GB, driver \GpuDriver) on a Vanda GPU node,
+\Reps{} times, interleaved with the others, and we report the fastest run (median spread
+\MedSpread\% in 3D, 3.3\% in 2D); the $256\times1$ split of \cref{sec:hybrid} is the same configuration as strong scaling at
+$P=256$, and the two sets of runs are pooled. The GPU runs used one \GpuName{} (48\,GB, driver \GpuDriver) on a Vanda GPU node,
 compiled with \code{nvc} \GpuNVC{} of the NVIDIA HPC SDK (\code{-O3 -mp=gpu -gpu=cc86}).
 
 \subsection{Serial baseline and problem size}\label{sec:serial}
@@ -505,16 +501,15 @@ the number of cache misses it can keep in flight, not by the memory level (\cref
 iteration count grows linearly in $N$, from \SzItMin{} to \SzItMax{} iterations ($\SzItPerNmin\,N$ to $\SzItPerNmax\,N$),
 so the time to solution grows like $N^{\SzSlopeSolve}$ and reaches \SzSolveMax\,s, \SzSolveMaxMin{}
 minutes, on the $512^3$ grid. Doubling the resolution from 256 to 512 makes the solve \SzDoubling{} times more expensive,
-close to the factor 16 of the $N^4$ law; this is the work that the parallel solver has to distribute. The size study ran on one core of a node shared with
-other jobs ($\SzTiterMax$\,ms per $512^3$ iteration); the serial baseline for all speedups below was
-measured in a separate 32-core job on the same processor type (\code{pbs/vanda\_node.pbs}), with the other
-cores of the chunk idle, at \SerialTiter\,ms.
+close to the factor 16 of the $N^4$ law; this is the work that the parallel solver has to distribute. The
+serial baseline for all speedups below, \SerialTiter\,ms per $512^3$ iteration, comes from the single-node
+job \code{pbs/vanda\_node.pbs} on the same processor type.
 
 The 2D solver covers $N=\SzTwoNmin$ to $\SzTwoNmax$, from 0.07 to \SzTwoDofsMax{} million unknowns and
 from 0.33 to 336 million nonzeros (\cref{tab:sizes2d}). Its cost per grid point shows the cache step that
 the 3D runs did not: at $N=\SzTwoNmin$ the touched part of the four vectors, about 2\,MiB, fits into the core's
 private 2\,MiB L2 cache and an update costs \SzTwoNsSmall\,ns, from $N=\SzTwoNsecond$ to 1024 the data come from
-L3 (\SzTwoNsSecond\,ns), and from 2048 on from DRAM, where the cost settles at \SzTwoNsLarge\,ns, or
+L3 (\SzTwoNsSecond\,ns), and from 2048 on from DRAM, where the cost reaches \SzTwoNsLarge\,ns at $8192^2$, or
 \SzTwoBwLarge\,GB/s against \SzBwLarge\,GB/s in 3D. The iteration count again grows linearly in $N$, $\SzTwoItPerNmin\,N$
 to $\SzTwoItPerNmax\,N$, so the 2D time to solution grows like $N^{\SzTwoSlopeSolve}$, between the $N^3$ of
 the ideal law and the cache effects at the small end, and reaches \SzTwoSolveMax\,s for $N=\SzTwoNsolveMax$.
@@ -657,7 +652,7 @@ the efficiency relative to one process falls to \WeakEffNode\%, the bandwidth wa
 \WeakTnode{} to \WeakTmax\,ms while the problem grows to $\WeakNmax^3$, \WeakDofsMax{} billion unknowns: a
 node-level weak-scaling efficiency of \WeakNodeEff\%. Most of the loss occurs in the first step across the
 network: two nodes need \WeakTtwo\,ms, and from three to seven nodes the time stays between \WeakTmidMin{}
-and \WeakTmidMax\,ms, so adding nodes beyond the second costs almost nothing. Weak scaling of the time per iteration also flatters the algorithm: the iteration
+and \WeakTmidMax\,ms, and eight nodes need \WeakTmax\,ms. Weak scaling of the time per iteration also flatters the algorithm: the iteration
 count grows like $N\propto P^{1/3}$, so the time to solution grows by the same factor even when every
 iteration scales perfectly, a growth that only a better preconditioner removes.
 
@@ -677,7 +672,7 @@ processes; absolute times in \cref{tab:strong}).}\label{fig:breakdown}
 The decomposition matters most, and the volume model of \cref{eq:volume} predicts it. Slabs are
 \RelOneDmin{} times slower than blocks on one node and \RelOneD{} times slower on \NodesMax{} nodes: every
 slab process ships two full $512^2$ planes, 4\,MiB per iteration whatever $P$, and at $P=256$ each slab is
-only two planes thick, so a process sends as much data as it owns. Pencils track blocks to within 5\% up to
+only two planes thick, so a process sends as much data as it owns. Pencils are 1--6\% faster than blocks up to
 224 processes, where their $P^{-1/2}$ halo volume is still close to the $P^{-2/3}$ of blocks and they avoid
 the strided $k$-faces, and fall behind at $P=\Pmax$ (\RelTwoD).
 
@@ -723,9 +718,8 @@ The best split is \HybBest{} (\HybBestT\,ms), \HybGain\% faster than pure MPI (\
 processes per socket mean eight times fewer participants in each reduction and fewer, larger halo
 messages, and the reduction wait drops from \HybRedPure{} to \HybRedBest\,ms per iteration. With more
 threads per process the fork--join cost of the many parallel regions per iteration grows, and one process
-per node with 32 threads (\HybWorstT\,ms) ties with \HybSecond{} (\HybSecondT\,ms) as the slowest split. The median runs (diamonds) show that the
-splits with 64 and 128 processes also suffered most from slow repetitions on the shared nodes. The right
-configuration is a few processes per socket with eight threads each.
+per node with 32 threads (\HybWorstT\,ms) ties with \HybSecond{} (\HybSecondT\,ms) as the slowest split. The right
+configuration is four processes per socket with eight threads each.
 
 \begin{figure}[t]
 \centering
@@ -765,8 +759,8 @@ The communication budget explains the difference. A process of the $\TwoN^2$ run
 \TwoLocalMax{} block and sends \TwoHaloKiBMax\,KiB per iteration in \TwoMsgsMax{} messages, twenty times
 less than in 3D, and the halo phase costs \TwoHaloMsMax\,ms, \TwoHaloFracMax\% of the iteration. The
 reductions cost \TwoRedMsMax\,ms, \TwoRedFracMax\% of it: the barrier wait of \cref{sec:comm} is a
-property of CG on a shared machine and appears in both problems, while the halo cost is a property of the
-geometry and nearly vanishes in 2D.
+property of the global synchronisation of CG and appears in both problems, while the halo cost is a property of the
+geometry and vanishes in 2D.
 
 The geometry also reverses the decomposition result. In 2D, slabs are faster than blocks at every process
 count, \TwoSlabMin{} times the baseline on one node and \TwoSlabMax{} on eight. A slab process sends two
@@ -778,7 +772,7 @@ in 3D is the one to use in 2D. The other two choices behave as in 3D: the blocki
 \TwoBlockRange{} times the baseline, and CG1 at \TwoCGoneRange, \TwoCGoneMax{} on eight nodes. The
 complete solve on 256 cores needs \TwoSolveIters{} iterations; it takes \TwoSolveCG\,s with classic CG,
 \TwoSolveSpeedup{} times faster than one process, and \TwoSolveCGone\,s with CG1, a \TwoSolveCGoneGain\%
-gain that the 3D solve does not show.
+gain against 2\% in 3D.
 
 \begin{figure}[t]
 \centering
@@ -861,22 +855,21 @@ $N$ & unknowns & GiB & CG ms/iter & CG1 ms/iter & GB/s & stencil (\%) & GLUP/s \
 \Cref{tab:solve} closes the loop with complete solves of the $512^3$ problem to $\varepsilon=10^{-8}$. All
 runs stop after \SolveIters{} iterations and reach the same error against the exact solution, which at this
 tolerance is set by the discretisation. At the serial baseline rate the serial code
-needs $\SolveIters\times\SerialTiter$\,ms $=\SolveSerialEst$\,s (the complete serial solve of the size
-study, on a shared node, took \SolveSerialMeas\,s). \Pmax{} cores on \NodesMax{} nodes solve the problem in
+needs $\SolveIters\times\SerialTiter$\,ms $=\SolveSerialEst$\,s. \Pmax{} cores on \NodesMax{} nodes solve the problem in
 \SolveCG\,s with classic CG and \SolveCGone\,s with CG1, \SolveSpeedup{} times faster; one A40 needs
 \SolveGpu\,s. Pipelined CG takes \SolvePipe\,s and is the only
 variant whose answer is worse: its true residual ends at \SolvePipeTrue, \SolvePipeRatio{} times the
 tolerance its recursive residual reports. The residual gap of \cref{sec:validation} grows with the problem
 and is the second cost of hiding the reduction, next to the extra memory traffic. The 2D solves need
-\TwoSolveIters{} iterations; 256 cores take \TwoSolveCG\,s and one A40 \GpuTwoSolve\,s. Over that many
-iterations even classic CG drifts: its true residual ends at \TwoSolveTrue, while the error against the
-exact solution stays at the discretisation level.
+\TwoSolveIters{} iterations; 256 cores take \TwoSolveCG\,s and one A40 \GpuTwoSolve\,s. After that many
+iterations the true residual of classic CG ends at \TwoSolveTrue, and the error against the exact
+solution sits at the discretisation level.
 
 \begin{table}[t]
 \centering\small
 \caption{Complete solves to $\varepsilon=10^{-8}$ of the $\NS^3$ and $\TwoN^2$ problems (CPU runs: 3D or 2D
 blocks, overlapped halo, 32 processes per node). ``speedup'' is relative to the serial baseline rate, $\SolveIters\times\SerialTiter$\,ms
-$=\SolveSerialEst$\,s, for 3D (the serial solve itself ran on a shared node) and relative to the
+$=\SolveSerialEst$\,s, for 3D and relative to the
 one-process rate, $\TwoSolveIters\times\TwoPoneT$\,ms $=\TwoSolveSerialEst$\,s, for 2D.}\label{tab:solve}
 \setlength{\tabcolsep}{4pt}
 \begin{tabular}{lllrrrccr}
@@ -910,7 +903,7 @@ The halo exchange moves all of the data---\HaloKiBPmax\,KiB per process and iter
 costs \HaloFracPmax\% of the iteration; the two reductions move 16 bytes and cost \RedFracPmax\%, because
 every reduction is a barrier at which \Pmax{} processes wait for the slowest one. The design choices follow
 from this. Blocks are the decomposition to use: slabs send as much as they compute and run \RelOneD{}
-times slower on \NodesMax{} nodes, and pencils fall \RelTwoD{} times behind at $P=\Pmax$. Overlapping the halo exchange hides little and is never faster than the
+times slower on \NodesMax{} nodes, and pencils fall \RelTwoD{} times behind at $P=\Pmax$. Overlapping the halo exchange hides little and is at most 1\% faster than the
 blocking exchange. Merging the two reductions (CG1) costs nothing but gains nothing measurable, because the
 time at the barrier is waiting, not latency. Pipelining the reduction hides its latency but not the
 waiting, adds a third more memory traffic and degrades the true residual \SolvePipeRatio-fold, so it does
